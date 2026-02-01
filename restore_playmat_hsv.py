@@ -166,10 +166,118 @@ def bilateral_smooth_edges(img, d=15, sigma_color=100, sigma_space=100):
     return smoothed
 
 
-def morphological_cleanup(img, kernel_size=5):
+def detect_text_regions(img):
+    """
+    Detect text-like regions for protection.
+    Text on playmats is:
+    - WHITE for instruction text
+    - LIME GREEN for heading text
+    
+    Uses color-based detection combined with edge analysis.
+    Returns a mask of text regions that should be protected.
+    """
+    print("Detecting text regions for protection (white instructions, lime green headings)...")
+    
+    # Convert to HSV for color-based text detection
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    
+    # === WHITE TEXT DETECTION (instruction text) ===
+    # White has low saturation and high value
+    white_text_mask = (s < 60) & (v > 180)
+    
+    # === LIME GREEN TEXT DETECTION (heading text) ===
+    # Lime green hue: 35-85 in OpenCV's 0-179 scale (equivalent to ~70-170° in standard 0-360°)
+    # High saturation and medium-high value
+    lime_green_mask = (h >= 35) & (h <= 85) & (s > 40) & (v > 100)
+    
+    # Combine color masks for text colors
+    text_color_mask = (white_text_mask | lime_green_mask).astype(np.uint8) * 255
+    
+    # Convert to grayscale for edge detection
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Canny edge detection to find text edges
+    edges = cv2.Canny(gray, 50, 150)
+    
+    # Dilate edges to connect text strokes into regions
+    text_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+    dilated = cv2.dilate(edges, text_kernel, iterations=2)
+    
+    # Find contours of potential text regions
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Create text protection mask based on contours
+    contour_mask = np.zeros(gray.shape, dtype=np.uint8)
+    
+    # Pre-calculate max text area threshold (10% of image area)
+    max_text_area = img.shape[0] * img.shape[1] * 0.1
+    
+    for contour in contours:
+        # Get bounding rectangle
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Skip contours with zero height (horizontal lines)
+        if h == 0:
+            continue
+            
+        area = cv2.contourArea(contour)
+        
+        # Text characteristics: reasonable aspect ratio, not too small, not too large
+        aspect_ratio = w / h
+        
+        # Text regions typically have aspect ratio > 1 (wider than tall) or 
+        # are small enough to be individual characters
+        is_text_like = (
+            (0.1 < aspect_ratio < 20) and  # Reasonable aspect ratio
+            (area > 100) and  # Not too small (noise)
+            (area < max_text_area) and  # Not too large (background)
+            (w > 10 or h > 10)  # Minimum dimension
+        )
+        
+        if is_text_like:
+            # Add padding around detected text region
+            padding = 5
+            x1 = max(0, x - padding)
+            y1 = max(0, y - padding)
+            x2 = min(img.shape[1], x + w + padding)
+            y2 = min(img.shape[0], y + h + padding)
+            contour_mask[y1:y2, x1:x2] = 255
+    
+    # Also protect high-contrast thin elements (likely text strokes)
+    # Use morphological gradient to find edges
+    morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    gradient = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, morph_kernel)
+    
+    # Threshold gradient to find high-contrast regions
+    _, high_contrast = cv2.threshold(gradient, 30, 255, cv2.THRESH_BINARY)
+    
+    # Dilate to create protection buffer around edges
+    edge_buffer = cv2.dilate(high_contrast, morph_kernel, iterations=2)
+    
+    # Combine all detection methods:
+    # 1. Text color regions (white and lime green)
+    # 2. Contour-based text detection
+    # 3. High-contrast edge regions
+    combined_mask = cv2.bitwise_or(text_color_mask, contour_mask)
+    combined_mask = cv2.bitwise_or(combined_mask, edge_buffer)
+    
+    # Dilate the combined mask slightly to create a protection buffer
+    protection_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    protected_mask = cv2.dilate(combined_mask, protection_kernel, iterations=1)
+    
+    text_pixel_count = np.sum(protected_mask > 0)
+    total_pixels = img.shape[0] * img.shape[1]
+    print(f"  Text protection: {text_pixel_count:,} pixels ({100.0 * text_pixel_count / total_pixels:.2f}%)")
+    
+    return protected_mask
+
+
+def morphological_cleanup(img, kernel_size=5, text_mask=None):
     """
     Apply morphological operations to clean up noise and smooth outlines.
     Removes small specs and smooths pixelated edges.
+    If text_mask is provided, applies gentler processing to text regions.
     """
     print(f"Applying morphological cleanup (kernel={kernel_size})...")
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
@@ -179,6 +287,20 @@ def morphological_cleanup(img, kernel_size=5):
     
     # Closing to fill small holes and smooth outlines
     cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
+    
+    # If text mask provided, blend original with cleaned to preserve text
+    if text_mask is not None:
+        print("  Applying text protection - preserving original in text regions...")
+        # Use smaller kernel for text regions (gentler cleanup)
+        text_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        text_cleaned = cv2.morphologyEx(img, cv2.MORPH_CLOSE, text_kernel, iterations=1)
+        
+        # Create 3-channel mask for blending
+        text_mask_3ch = cv2.cvtColor(text_mask, cv2.COLOR_GRAY2BGR)
+        text_mask_float = text_mask_3ch.astype(np.float32) / 255.0
+        
+        # Blend: use gentler cleanup for text regions, aggressive cleanup elsewhere
+        cleaned = (text_mask_float * text_cleaned + (1 - text_mask_float) * cleaned).astype(np.uint8)
     
     return cleaned
 
@@ -256,26 +378,29 @@ def restore_image(image_path, output_dir):
     # Phase 1: Load and upscale
     img_large, original_size = load_and_upscale(image_path)
     
-    # Phase 2: HSV-based color preprocessing
+    # Phase 2: Detect text regions for protection BEFORE any processing
+    text_mask = detect_text_regions(img_large)
+    
+    # Phase 3: HSV-based color preprocessing
     img_preprocessed = preprocess_with_hsv(img_large)
     
-    # Phase 3a: Bilateral filtering for edge-preserving smoothing
+    # Phase 4a: Bilateral filtering for edge-preserving smoothing
     img_smooth = bilateral_smooth_edges(img_preprocessed)
     
-    # Phase 3b: Morphological cleanup
-    img_cleaned = morphological_cleanup(img_smooth)
+    # Phase 4b: Morphological cleanup with text protection
+    img_cleaned = morphological_cleanup(img_smooth, text_mask=text_mask)
     
-    # Phase 3c: Snap to exact palette colors
+    # Phase 4c: Snap to exact palette colors
     img_quantized = snap_to_palette(img_cleaned)
     
-    # Phase 3d: Solidify color regions (remove any remaining texture)
+    # Phase 4d: Solidify color regions (remove any remaining texture)
     img_solid = solidify_color_regions(img_quantized)
     
-    # Phase 4: Downscale back to original size
+    # Phase 5: Downscale back to original size
     print(f"Downscaling to original size: {original_size}")
     img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
     
-    # Phase 5: Final palette enforcement
+    # Phase 6: Final palette enforcement
     img_final = snap_to_palette(img_final)
     
     # Save output
