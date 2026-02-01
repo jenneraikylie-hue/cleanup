@@ -387,13 +387,34 @@ def preprocess_special_colors(img):
     # 12. LIME GREEN OUTLINE (silhouette edge ONLY, thin high-contrast)
     # Observed: RGB(155-200, 180-215, 0-35) - never appears as fill
     # BGR format: B=0-35, G=180-215, R=155-200
-    green_mask = (b >= 0) & (b <= 35) & \
-                 (g >= 180) & (g <= 215) & \
-                 (r >= 155) & (r <= 200) & \
-                 (g > b) & (g > r)  # G must be highest
+    # CRITICAL: Only apply to actual edge pixels, not fills
+    
+    # First, detect potential green pixels by color
+    green_color_mask = (b >= 0) & (b <= 35) & \
+                       (g >= 180) & (g <= 215) & \
+                       (r >= 155) & (r <= 200) & \
+                       (g > b) & (g > r)  # G must be highest
+    
+    # Now detect edges in the image to ensure we only mark actual outline pixels
+    gray = cv2.cvtColor(img_processed, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    
+    # Dilate edges slightly to capture thin outlines
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    edge_zone = cv2.dilate(edges, kernel, iterations=2)
+    
+    # Green ONLY where both conditions are met: color matches AND it's on an edge
+    green_mask = green_color_mask & (edge_zone > 0)
+    
     img_processed[green_mask] = neon_green
     green_count = np.sum(green_mask)
-    print(f"  Neon green outline: {green_count:,} pixels → neon_green (flat)")
+    print(f"  Neon green outline (edges only): {green_count:,} pixels → neon_green (flat)")
+    
+    # Any remaining green-colored pixels that are NOT on edges should be yellow
+    green_interior = green_color_mask & (edge_zone == 0)
+    if np.sum(green_interior) > 0:
+        img_processed[green_interior] = bright_yellow
+        print(f"  Green-tinted interior (converted): {np.sum(green_interior):,} pixels → bright_yellow (flat)")
     
     # Update channels
     b, g, r = cv2.split(img_processed)
@@ -484,18 +505,18 @@ def fill_holes(img):
 
 
 def solidify_color_regions(img):
-    """Solidify color regions to remove scanner edge gradients and shading artifacts."""
+    """Solidify color regions to remove scanner edge gradients and shading artifacts.
+    Uses aggressive median filtering to completely flatten color regions."""
     print("\n=== Phase 3d: Solidifying Color Regions ===")
     
     result = img.copy()
     
-    # Apply median filter once for efficiency (reused for all color regions)
-    kernel_size = 7  # Larger kernel handles gradual scanner edge shading
+    # Apply LARGER median filter for more aggressive flattening
+    kernel_size = 11  # Increased from 7 to remove more texture/noise
     img_median = cv2.medianBlur(img, kernel_size)
     
-    # Minimum region size threshold: 1000 pixels (roughly 32x32 area)
-    # Avoids processing noise/small artifacts while catching all significant regions
-    MIN_REGION_SIZE = 1000
+    # Minimum region size threshold: 500 pixels (lowered to catch smaller regions)
+    MIN_REGION_SIZE = 500
     
     # For each major palette color, find its regions and apply median filter
     # This removes gradients within solid color areas while preserving edges
@@ -514,7 +535,7 @@ def solidify_color_regions(img):
             # This removes gradients but the median filter preserves edges better than blur
             result[color_mask > 0] = img_median[color_mask > 0]
     
-    print("Color regions solidified")
+    print("Color regions solidified with aggressive flattening")
     return result
 
 
@@ -541,6 +562,75 @@ def apply_edge_antialiasing(img):
     result = (result * (1 - alpha * mask_3ch) + img_blurred * alpha * mask_3ch).astype(np.uint8)
     
     print("Anti-aliasing applied to edges")
+    return result
+
+
+def force_exact_palette_colors(img):
+    """Final cleanup: Force every pixel to be an exact palette color.
+    Removes any salt-and-pepper noise, speckles, or intermediate colors
+    created by filters/anti-aliasing to achieve perfectly clean vector-style output.
+    Also enforces that neon_green only appears on edges, not in fills."""
+    print("\n=== Phase 5: Final Palette Enforcement ===")
+    
+    img_float = img.astype(np.float32)
+    h, w = img.shape[:2]
+    
+    # Reshape image to (n_pixels, 3)
+    pixels = img_float.reshape(-1, 3)
+    
+    # Calculate distances to all palette colors (vectorized)
+    # Shape: (n_pixels, n_colors)
+    distances = np.sqrt(np.sum((pixels[:, np.newaxis, :] - PALETTE_ARRAY[np.newaxis, :, :]) ** 2, axis=2))
+    
+    # Find nearest color for each pixel
+    nearest_idx = np.argmin(distances, axis=1)
+    
+    # Map to exact palette colors
+    snapped = PALETTE_ARRAY[nearest_idx]
+    
+    # Reshape back to image
+    result = snapped.reshape(h, w, 3).astype(np.uint8)
+    
+    # CRITICAL: Enforce neon_green ONLY on edges, never in fills
+    neon_green = np.array(PALETTE['neon_green'], dtype=np.uint8)
+    bright_yellow = np.array(PALETTE['bright_yellow'], dtype=np.uint8)
+    
+    # Find all neon_green pixels
+    green_mask = np.all(result == neon_green, axis=2)
+    
+    if np.sum(green_mask) > 0:
+        # Detect edges in the image
+        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # Dilate edges slightly to capture thin outlines
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        edge_zone = cv2.dilate(edges, kernel, iterations=2)
+        
+        # Green pixels NOT on edges should become yellow (they're interior fills)
+        green_interior = green_mask & (edge_zone == 0)
+        if np.sum(green_interior) > 0:
+            result[green_interior] = bright_yellow
+            print(f"  Converted {np.sum(green_interior):,} green interior pixels → bright_yellow")
+    
+    # Count pixels per color for verification
+    unique_colors = {}
+    for color_name, color_bgr in PALETTE.items():
+        color_arr = np.array(color_bgr, dtype=np.uint8)
+        mask = np.all(result == color_arr, axis=2)
+        count = np.sum(mask)
+        if count > 0:
+            unique_colors[color_name] = count
+    
+    total_pixels = h * w
+    exact_match = sum(unique_colors.values())
+    
+    print(f"  Final palette distribution:")
+    for name, count in sorted(unique_colors.items(), key=lambda x: x[1], reverse=True):
+        pct = (count / total_pixels) * 100
+        print(f"    {name:15}: {count:10,} pixels ({pct:5.2f}%)")
+    print(f"  Total: {exact_match:,} / {total_pixels:,} pixels (100.0%) - perfectly flat")
+    
     return result
 
 
@@ -572,12 +662,18 @@ def process_image(input_path, output_path=None):
     img_filled = fill_holes(img_reinforced)
     img_solidified = solidify_color_regions(img_filled)
     
-    # Phase 4: Final Polish
-    img_final = apply_edge_antialiasing(img_solidified)
+    # Phase 4: Final Polish (optional anti-aliasing - disabled for perfectly flat output)
+    # img_antialiased = apply_edge_antialiasing(img_solidified)
+    
+    # Phase 5: Force exact palette colors (removes all noise/speckles)
+    img_final = force_exact_palette_colors(img_solidified)
     
     # Downscale back to original size
     print(f"\n=== Downscaling back to original size: {original_size} ===")
     img_output = cv2.resize(img_final, original_size, interpolation=cv2.INTER_AREA)
+    
+    # Final snap after downscaling to ensure no intermediate colors from resizing
+    img_output = force_exact_palette_colors(img_output)
     
     # Generate output path if not provided
     if output_path is None:
