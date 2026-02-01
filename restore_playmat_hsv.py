@@ -125,18 +125,22 @@ def preprocess_with_hsv(img):
     # ==== 5. PINK/MAGENTA ELEMENTS (hot pink, outline magenta, and dark purple) ====
     # Based on provided color samples:
     # - Hot pink/Magenta: HSL 311-315° → OpenCV hue ~155-158 (#FF00C9, #FD00CC, #F600B8)
-    # - Very high saturation (98-100%) and medium-high lightness (48-50%)
+    #   Very high saturation, V > 240 (RGB values near 255)
+    # - Outline magenta (dark pinkish-purple outline): HSL 308-317° → OpenCV hue ~154-159
+    #   Colors like #EC00AA, #E801B5, #EF00B3 with V ~220-240
+    #   This is the thin line that sits outside the hot pink
+    # - Dark purple (darkest): V < 180 - outer border
     # Pink/Magenta hue: 140-175 degrees (covers hot pink through outline_magenta)
     # CRITICAL: Logo has layers - white, hot pink, outline_magenta, dark purple
     pink_hue_mask = ((h >= 140) & (h <= 175)) & (s > 70)
     
     # Differentiate by value to preserve all pink layers:
-    # Hot pink (brightest): V > 180, very saturated - the main pink color (#FF00C9, etc.)
-    # Outline magenta (medium): 100 < V <= 180 - rgb(219, 0, 149) darker outlines
-    # Dark purple (darkest): 50 < V <= 100 - outer border
-    hot_pink_mask = pink_hue_mask & (v > 180)
-    outline_magenta_mask = pink_hue_mask & (v > 100) & (v <= 180)
-    dark_purple_mask = pink_hue_mask & (v > 50) & (v <= 100)
+    # Hot pink (brightest): V > 240, very saturated - the main pink color (#FF00C9, etc.)
+    # Outline magenta (medium-high): 180 < V <= 240 - darker pink-purple outlines (#EC00AA, rgb(219,0,149))
+    # Dark purple (darkest): 50 < V <= 180 - outer border
+    hot_pink_mask = pink_hue_mask & (v > 240)
+    outline_magenta_mask = pink_hue_mask & (v > 180) & (v <= 240)
+    dark_purple_mask = pink_hue_mask & (v > 50) & (v <= 180)
     
     img_processed[hot_pink_mask] = hot_pink
     img_processed[outline_magenta_mask] = outline_magenta
