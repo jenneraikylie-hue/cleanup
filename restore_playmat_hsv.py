@@ -99,21 +99,23 @@ def preprocess_with_hsv(img):
     blue_count = np.sum(blue_mask)
     print(f"  Blue background (all): {blue_count:,} pixels → sky_blue")
     
-    # ==== 3. YELLOW ELEMENTS (silhouettes, text, with glare variations) ====
-    # Yellow hue in HSV: 20-40 degrees (out of 180 in OpenCV)
-    # Covers all yellow variations (silhouettes, text, glare)
-    yellow_mask = (h >= 20) & (h <= 40) & (s > 100) & (v > 100)
-    img_processed[yellow_mask] = bright_yellow
-    yellow_count = np.sum(yellow_mask)
-    print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
-    
-    # ==== 4. NEON GREEN (outlines around silhouettes) ====
-    # Green hue: 35-85 degrees (expanded range)
-    # CRITICAL: Expanded range and lowered thresholds to catch all green outline variations
-    green_mask = (h >= 35) & (h <= 85) & (s > 40) & (v > 60)
+    # ==== 3. NEON GREEN (outlines around silhouettes) - PROCESS BEFORE YELLOW ====
+    # Green hue: 40-85 degrees in OpenCV's 0-179 scale
+    # CRITICAL: Process green BEFORE yellow to preserve outline detail
+    # Lowered thresholds to catch thin green outlines that may be faded
+    green_mask = (h >= 40) & (h <= 85) & (s > 30) & (v > 50)
     img_processed[green_mask] = neon_green
     green_count = np.sum(green_mask)
     print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
+    
+    # ==== 4. YELLOW ELEMENTS (silhouettes, text, with glare variations) ====
+    # Yellow hue in HSV: 20-39 degrees (narrowed to avoid overlap with green)
+    # CRITICAL: Process AFTER green to preserve green outlines around yellow silhouettes
+    # Exclude pixels already marked as green
+    yellow_mask = (h >= 20) & (h <= 39) & (s > 80) & (v > 100) & ~green_mask
+    img_processed[yellow_mask] = bright_yellow
+    yellow_count = np.sum(yellow_mask)
+    print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
     # ==== 5. PINK/MAGENTA ELEMENTS (hot pink, outline magenta, and dark purple) ====
     # Pink/Magenta hue: 140-175 degrees (expanded range for outline_magenta)
@@ -187,9 +189,9 @@ def detect_text_regions(img):
     white_text_mask = (s < 60) & (v > 180)
     
     # === LIME GREEN TEXT DETECTION (heading text) ===
-    # Lime green hue: 35-85 in OpenCV's 0-179 scale (equivalent to ~70-170° in standard 0-360°)
-    # High saturation and medium-high value
-    lime_green_mask = (h >= 35) & (h <= 85) & (s > 40) & (v > 100)
+    # Lime green hue: 40-85 in OpenCV's 0-179 scale (matches neon_green detection)
+    # Medium-high saturation and value
+    lime_green_mask = (h >= 40) & (h <= 85) & (s > 30) & (v > 100)
     
     # Combine color masks for text colors
     text_color_mask = (white_text_mask | lime_green_mask).astype(np.uint8) * 255
