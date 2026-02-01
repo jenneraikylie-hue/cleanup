@@ -614,14 +614,6 @@ def force_exact_palette_colors(img):
         print(f"    {color_name}: {count:,} pixels ({pct:.2f}%)")
     
     return result
-    
-    print(f"  Final palette distribution:")
-    for name, count in sorted(unique_colors.items(), key=lambda x: x[1], reverse=True):
-        pct = (count / total_pixels) * 100
-        print(f"    {name:15}: {count:10,} pixels ({pct:5.2f}%)")
-    print(f"  Total: {exact_match:,} / {total_pixels:,} pixels ({exact_pct:.1f}%) - perfectly flat")
-    
-    return result
 
 
 def process_image(input_path, output_path=None):
