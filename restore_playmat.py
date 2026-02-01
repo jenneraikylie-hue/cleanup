@@ -25,11 +25,11 @@ PALETTE = {
 }
 
 # Special color detection thresholds
-NEAR_WHITE_THRESHOLD = 200  # Minimum channel value for near-white detection (lowered from 244 to catch light blue-white colors)
+NEAR_WHITE_THRESHOLD = 205  # Minimum channel value for near-white detection (catches RGB 205-255 range for light blue-white colors)
 BLUE_GLARE_B_THRESHOLD = 230  # Blue channel threshold for glare detection
 BLUE_GLARE_G_THRESHOLD = 180  # Green channel threshold for glare detection
 BLUE_GLARE_R_THRESHOLD = 140  # Red channel threshold for glare detection
-BLUE_GLARE_R_MAX = 200  # Red channel must be below this to avoid catching near-white colors
+BLUE_GLARE_R_MAX = 205  # Red channel must be below this to avoid catching near-white colors
 
 # Yellow edge gradient thresholds (for scanner edge artifacts)
 # Bright yellow is BGR(1, 252, 253), so we look for high G and B, very low R
@@ -247,7 +247,7 @@ def preprocess_special_colors(img):
     
     img_processed = img.copy()
     
-    # 1. Snap near-white colors (all channels >= 200) to pure white
+    # 1. Snap near-white colors (all channels >= 205) to pure white
     # IMPORTANT: This must happen FIRST to protect near-white colors from being misclassified as blue glare
     # In BGR format: checking all channels are >= NEAR_WHITE_THRESHOLD
     near_white_mask = np.all(img >= NEAR_WHITE_THRESHOLD, axis=2)
@@ -265,8 +265,8 @@ def preprocess_special_colors(img):
     # RGB(161, 205, 252) -> BGR(252, 205, 161)
     # RGB(185, 212, 247) -> BGR(247, 212, 185)
     
-    # Create mask for blue glare: light blue colors (high B, medium-high G, medium R in BGR)
-    # Characteristics: B > 230, G > 180, 140 < R < 200 (R must be lower than near-white to differentiate)
+    # Create mask for blue glare: light blue colors (high B, medium-high G, medium to moderately-high R in BGR)
+    # Characteristics: B > 230, G > 180, 140 < R < 205 (R must be lower than near-white to differentiate)
     # and B is highest channel
     b, g, r = cv2.split(img_processed)  # Use processed image to avoid re-detecting near-white
     blue_glare_mask = (b > BLUE_GLARE_B_THRESHOLD) & \
