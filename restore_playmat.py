@@ -512,7 +512,9 @@ def solidify_color_regions(img):
     result = img.copy()
     
     # Apply LARGER median filter for more aggressive flattening
-    kernel_size = 11  # Increased from 7 to remove more texture/noise
+    # Kernel size 11: Handles scanner edge gradients and texture artifacts
+    # Must be odd for medianBlur. Size chosen to balance flattening vs edge preservation.
+    kernel_size = 11
     img_median = cv2.medianBlur(img, kernel_size)
     
     # Minimum region size threshold: 500 pixels (lowered to catch smaller regions)
@@ -624,12 +626,13 @@ def force_exact_palette_colors(img):
     
     total_pixels = h * w
     exact_match = sum(unique_colors.values())
+    exact_pct = (exact_match / total_pixels) * 100 if total_pixels > 0 else 0
     
     print(f"  Final palette distribution:")
     for name, count in sorted(unique_colors.items(), key=lambda x: x[1], reverse=True):
         pct = (count / total_pixels) * 100
         print(f"    {name:15}: {count:10,} pixels ({pct:5.2f}%)")
-    print(f"  Total: {exact_match:,} / {total_pixels:,} pixels (100.0%) - perfectly flat")
+    print(f"  Total: {exact_match:,} / {total_pixels:,} pixels ({exact_pct:.1f}%) - perfectly flat")
     
     return result
 
@@ -661,9 +664,6 @@ def process_image(input_path, output_path=None):
     img_reinforced = reinforce_outlines(img_snapped)
     img_filled = fill_holes(img_reinforced)
     img_solidified = solidify_color_regions(img_filled)
-    
-    # Phase 4: Final Polish (optional anti-aliasing - disabled for perfectly flat output)
-    # img_antialiased = apply_edge_antialiasing(img_solidified)
     
     # Phase 5: Force exact palette colors (removes all noise/speckles)
     img_final = force_exact_palette_colors(img_solidified)
