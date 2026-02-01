@@ -81,23 +81,23 @@ def preprocess_with_hsv(img):
     black = np.array(PALETTE['black'], dtype=np.uint8)
     outline_magenta = np.array(PALETTE['outline_magenta'], dtype=np.uint8)
     
-    # ==== 1. BLUE BACKGROUND FIRST (to prevent shadow blues becoming white) ====
-    # Blue hue: 90-130 degrees
-    # CRITICAL: Process blue BEFORE white to catch shadow blues correctly
-    # Expanded range to catch all blue variations including darker shadow blues
-    blue_mask = (h >= 85) & (h <= 135) & (s > 20) & (v > 50)
-    img_processed[blue_mask] = sky_blue
-    blue_count = np.sum(blue_mask)
-    print(f"  Blue background (all): {blue_count:,} pixels → sky_blue")
-    
-    # ==== 2. WHITE ELEMENTS (stars, logos, text) ====
-    # White has very low saturation and very high value
-    # CRITICAL: Very strict to avoid false positives - only true whites
-    # Must NOT be in the blue hue range (already processed above)
-    white_mask = (s < 35) & (v > 220) & ~blue_mask
+    # ==== 1. WHITE ELEMENTS FIRST (stars, logos, text, circular effects) ====
+    # White has low saturation and high value
+    # CRITICAL: Process white FIRST to preserve logo interiors, text, and circular effects
+    # Relaxed thresholds (S < 60, V > 180) to catch all white elements including blue-tinted whites
+    white_mask = (s < 60) & (v > 180)
     img_processed[white_mask] = pure_white
     white_count = np.sum(white_mask)
     print(f"  White elements: {white_count:,} pixels → pure_white")
+    
+    # ==== 2. BLUE BACKGROUND (after white, to avoid overwriting logo/text) ====
+    # Blue hue: 85-135 degrees
+    # CRITICAL: Process blue AFTER white, exclude already-white pixels
+    # Only catch pixels with sufficient saturation that are clearly blue (not white)
+    blue_mask = (h >= 85) & (h <= 135) & (s > 40) & (v > 50) & ~white_mask
+    img_processed[blue_mask] = sky_blue
+    blue_count = np.sum(blue_mask)
+    print(f"  Blue background (all): {blue_count:,} pixels → sky_blue")
     
     # ==== 3. YELLOW ELEMENTS (silhouettes, text, with glare variations) ====
     # Yellow hue in HSV: 20-40 degrees (out of 180 in OpenCV)
