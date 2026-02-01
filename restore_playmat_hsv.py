@@ -153,13 +153,15 @@ def preprocess_with_hsv(img):
     print(f"  Outline magenta: {magenta_count:,} pixels → outline_magenta")
     print(f"  Dark purple: {purple_count:,} pixels → dark_purple")
     
-    # ==== 6. RED ELEMENTS (vibrant red) ====
+    # ==== 6. RED ELEMENTS (vibrant red outlines) ====
     # Based on provided color samples:
-    # - Red colors: HSL 358-360° and 0-1° → OpenCV hue ~0-1 and ~179-180 (wraps around)
-    # - Colors like #FC0100, #FE0001, #FA1D1D have hue 0 or 179-180 in OpenCV scale
-    # - Very high saturation (96-100%) and medium-high value
-    # Red hue: 0-10 or 170-180 degrees (wraps around)
-    red_mask = (((h >= 0) & (h <= 10)) | ((h >= 170) & (h <= 180))) & (s > 120) & (v > 150)
+    # - Red outline colors: HSL 345-360° and 0-3° → OpenCV hue ~173-180 and 0-2
+    # - Colors like #F90208, #FA0113, #FA013F, #FD0108, #FB0020 (outline reds)
+    # - Also #FC0100, #FE0001, #FA1D1D (solid reds)
+    # - All have very high saturation (98-100%) and medium-high value (48-50%)
+    # Red hue: 0-12 or 168-180 degrees (wraps around, extended to catch #FA013F at HSL 345°)
+    # Lowered saturation threshold to catch slightly desaturated reds
+    red_mask = (((h >= 0) & (h <= 12)) | ((h >= 168) & (h <= 180))) & (s > 100) & (v > 140)
     img_processed[red_mask] = vibrant_red
     red_count = np.sum(red_mask)
     print(f"  Vibrant red: {red_count:,} pixels → vibrant_red")
