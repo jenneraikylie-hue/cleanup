@@ -23,7 +23,8 @@ PALETTE = {
     'dark_purple':   (140, 0, 180),    # Outer Logo Border (3rd Layer)
     'vibrant_red':   (1, 13, 245),     # Ladder Accents/Underlines
     'deep_teal':     (10, 176, 149),   # Small Text/Shadows
-    'black':         (0, 0, 0)         # Void/Scan Edges
+    'black':         (0, 0, 0),        # Void/Scan Edges
+    'magenta':       (149, 0, 219)     # rgb(219, 0, 149)
 }
 
 # Convert palette to arrays for vectorized operations
