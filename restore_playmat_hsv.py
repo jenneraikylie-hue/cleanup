@@ -104,20 +104,20 @@ def preprocess_with_hsv(img):
     # - Lime green outline: HSL 67-70° → OpenCV hue ~33-35
     # - Colors like #96be45, #b5cd00, #a9cb1b have hue around 33-35 in OpenCV scale
     # CRITICAL: Process green BEFORE yellow to preserve outline detail
-    # Expanded range to 30-85 to catch lime-green outlines
-    green_mask = (h >= 30) & (h <= 85) & (s > 30) & (v > 50)
+    # Green range: 33-85° to catch lime-green outlines (HSL 66+)
+    green_mask = (h >= 33) & (h <= 85) & (s > 30) & (v > 50)
     img_processed[green_mask] = neon_green
     green_count = np.sum(green_mask)
     print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
     
     # ==== 4. YELLOW ELEMENTS (silhouettes, text, with glare variations) ====
     # Based on provided color samples:
-    # - Yellow silhouette inside: HSL 62-63° → OpenCV hue ~31
-    # - Colors like #DFE801, #DCE803 have hue around 31 in OpenCV scale
-    # Yellow hue in HSV: 20-29 degrees (narrowed to separate from green outlines)
+    # - Golden orange: HSL 58-59° → OpenCV hue ~29-30 (#FEF900, #FFFA00)
+    # - Yellow silhouette inside: HSL 62-63° → OpenCV hue ~31 (#DFE801, #DCE803)
+    # Yellow hue in HSV: 20-32 degrees to capture all yellow variations
     # CRITICAL: Process AFTER green to preserve green outlines around yellow silhouettes
     # Exclude pixels already marked as green
-    yellow_mask = (h >= 20) & (h <= 29) & (s > 80) & (v > 100) & ~green_mask
+    yellow_mask = (h >= 20) & (h <= 32) & (s > 80) & (v > 100) & ~green_mask
     img_processed[yellow_mask] = bright_yellow
     yellow_count = np.sum(yellow_mask)
     print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
@@ -147,8 +147,12 @@ def preprocess_with_hsv(img):
     print(f"  Dark purple: {purple_count:,} pixels → dark_purple")
     
     # ==== 6. RED ELEMENTS (vibrant red) ====
+    # Based on provided color samples:
+    # - Red colors: HSL 358-360° and 0-1° → OpenCV hue ~0-1 and ~179-180 (wraps around)
+    # - Colors like #FC0100, #FE0001, #FA1D1D have hue 0 or 179-180 in OpenCV scale
+    # - Very high saturation (96-100%) and medium-high value
     # Red hue: 0-10 or 170-180 degrees (wraps around)
-    red_mask = (((h >= 0) & (h <= 10)) | ((h >= 170) & (h <= 180))) & (s > 150) & (v > 200)
+    red_mask = (((h >= 0) & (h <= 10)) | ((h >= 170) & (h <= 180))) & (s > 120) & (v > 150)
     img_processed[red_mask] = vibrant_red
     red_count = np.sum(red_mask)
     print(f"  Vibrant red: {red_count:,} pixels → vibrant_red")
@@ -194,10 +198,10 @@ def detect_text_regions(img):
     white_text_mask = (s < 60) & (v > 180)
     
     # === LIME GREEN TEXT DETECTION (heading text) ===
-    # Lime green hue: 30-85 in OpenCV's 0-179 scale (matches neon_green detection)
+    # Lime green hue: 33-85 in OpenCV's 0-179 scale (matches neon_green detection)
     # Based on color samples: HSL 67-70° → OpenCV ~33-35
     # Medium-high saturation and value
-    lime_green_mask = (h >= 30) & (h <= 85) & (s > 30) & (v > 100)
+    lime_green_mask = (h >= 33) & (h <= 85) & (s > 30) & (v > 100)
     
     # Combine color masks for text colors
     text_color_mask = (white_text_mask | lime_green_mask).astype(np.uint8) * 255
