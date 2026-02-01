@@ -113,7 +113,25 @@ def preprocess_with_hsv(img):
     green_mask_uint8 = green_mask.astype(np.uint8) * 255
     green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     green_mask_closed = cv2.morphologyEx(green_mask_uint8, cv2.MORPH_CLOSE, green_close_kernel, iterations=2)
-    green_mask_final = green_mask_closed > 0
+    
+    # Remove small disconnected "rogue" green pixels using connected component analysis
+    # This keeps only large connected regions (the actual outlines) and removes isolated pixels
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(green_mask_closed, connectivity=8)
+    
+    # Calculate minimum area threshold (keep components > 100 pixels)
+    min_component_area = 100
+    
+    # Create cleaned mask keeping only significant components
+    green_mask_clean = np.zeros_like(green_mask_closed)
+    for i in range(1, num_labels):  # Skip background (label 0)
+        if stats[i, cv2.CC_STAT_AREA] >= min_component_area:
+            green_mask_clean[labels == i] = 255
+    
+    # Apply Gaussian blur then re-threshold to smooth the edges of the mask
+    # This creates professional-looking smooth outlines
+    green_mask_smooth = cv2.GaussianBlur(green_mask_clean, (5, 5), 0)
+    _, green_mask_final_uint8 = cv2.threshold(green_mask_smooth, 127, 255, cv2.THRESH_BINARY)
+    green_mask_final = green_mask_final_uint8 > 0
     
     img_processed[green_mask_final] = neon_green
     green_count = np.sum(green_mask_final)
