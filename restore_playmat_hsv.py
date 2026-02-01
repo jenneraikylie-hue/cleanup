@@ -104,10 +104,19 @@ def preprocess_with_hsv(img):
     # - Lime green outline: HSL 67-70° → OpenCV hue ~33-35
     # - Colors like #96be45, #b5cd00, #a9cb1b have hue around 33-35 in OpenCV scale
     # CRITICAL: Process green BEFORE yellow to preserve outline detail
-    # Green range: 34-85° to catch lime-green outlines (HSL 68+), starts at 34 to avoid block yellow
-    green_mask = (h >= 34) & (h <= 85) & (s > 30) & (v > 50)
-    img_processed[green_mask] = neon_green
-    green_count = np.sum(green_mask)
+    # Green range: 33-85° to catch lime-green outlines (HSL 67+), lowered to 33 for better coverage
+    # Lowered saturation threshold to catch slightly desaturated green pixels
+    green_mask = (h >= 33) & (h <= 85) & (s > 25) & (v > 45)
+    
+    # Apply morphological closing to fill gaps in green outlines
+    # This creates consistent, continuous outlines without jaggedness
+    green_mask_uint8 = green_mask.astype(np.uint8) * 255
+    green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    green_mask_closed = cv2.morphologyEx(green_mask_uint8, cv2.MORPH_CLOSE, green_close_kernel, iterations=2)
+    green_mask_final = green_mask_closed > 0
+    
+    img_processed[green_mask_final] = neon_green
+    green_count = np.sum(green_mask_final)
     print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
     
     # ==== 4. YELLOW ELEMENTS (silhouettes, blocks, ladder text, with glare variations) ====
@@ -119,7 +128,7 @@ def preprocess_with_hsv(img):
     # Yellow hue in HSV: 20-33 degrees to capture all yellow variations including block yellow
     # CRITICAL: Process AFTER green to preserve green outlines around yellow silhouettes
     # Exclude pixels already marked as green
-    yellow_mask = (h >= 20) & (h <= 33) & (s > 80) & (v > 100) & ~green_mask
+    yellow_mask = (h >= 20) & (h <= 33) & (s > 80) & (v > 100) & ~green_mask_final
     img_processed[yellow_mask] = bright_yellow
     yellow_count = np.sum(yellow_mask)
     print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
