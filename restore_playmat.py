@@ -348,7 +348,6 @@ def preprocess_special_colors(img):
     print(f"  Neon green outline -> neon_green: {green_count:,} pixels")
     
     return img_processed
-    return img_processed
 
 
 def snap_to_palette(img, protection_mask):
