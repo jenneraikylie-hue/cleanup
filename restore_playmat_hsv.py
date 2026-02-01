@@ -539,6 +539,208 @@ def uniform_outline_width(img):
     return img_result
 
 
+def vectorize_edges(img, straightness_threshold=0.02, min_contour_area=500):
+    """
+    Create vector-like clean edges by:
+    1. Detecting straight lines and making them perfectly straight
+    2. Smoothing curves while preserving their shape
+    3. Creating clean, professional edges for all color regions
+    
+    This is shape-aware: rectangles get straight edges, circles stay curved.
+    """
+    print("Vectorizing edges for clean, professional appearance...")
+    
+    img_result = img.copy()
+    total_contours_processed = 0
+    
+    # Process each palette color (except background and black)
+    for color_name, color_bgr in PALETTE.items():
+        if color_name in ['sky_blue', 'black']:
+            continue
+            
+        color_bgr = np.array(color_bgr, dtype=np.uint8)
+        
+        # Find pixels of this color
+        mask = np.all(img == color_bgr, axis=2).astype(np.uint8) * 255
+        
+        if np.sum(mask) < min_contour_area:
+            continue
+        
+        # Find contours for this color region
+        contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            continue
+        
+        # Create new mask for vectorized version
+        new_mask = np.zeros_like(mask)
+        
+        for i, contour in enumerate(contours):
+            if cv2.contourArea(contour) < 50:  # Skip tiny contours
+                continue
+            
+            total_contours_processed += 1
+            
+            # Get contour perimeter
+            perimeter = cv2.arcLength(contour, True)
+            
+            if perimeter < 10:  # Skip tiny perimeters
+                cv2.drawContours(new_mask, [contour], -1, 255, -1)
+                continue
+            
+            # Approximate the contour with different epsilon values
+            # to determine if it's more line-like or curve-like
+            
+            # Try a rough approximation first
+            epsilon_rough = straightness_threshold * perimeter
+            approx_rough = cv2.approxPolyDP(contour, epsilon_rough, True)
+            
+            # Check if this is a roughly rectangular shape (4-6 vertices)
+            is_rectangular = 4 <= len(approx_rough) <= 6
+            
+            # Check for circularity
+            area = cv2.contourArea(contour)
+            if perimeter > 0:
+                circularity = 4 * np.pi * area / (perimeter * perimeter)
+            else:
+                circularity = 0
+            
+            is_circular = circularity > 0.7  # Circles have circularity close to 1
+            
+            if is_rectangular and not is_circular:
+                # This is a rectangular shape - use polygon approximation
+                # to create straight edges
+                epsilon = 0.015 * perimeter  # Tighter approximation for straighter edges
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                
+                # For rectangles, ensure we have clean 90-degree corners
+                # by snapping angles to nearest 90 degrees if close
+                if len(approx) == 4:
+                    approx = _snap_to_right_angles(approx)
+                
+                cv2.drawContours(new_mask, [approx], -1, 255, -1)
+                
+            elif is_circular:
+                # This is a circular shape - preserve the curve
+                # Use a smoother approximation
+                epsilon = 0.005 * perimeter  # Very fine approximation to preserve curves
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                
+                # Additionally, fit an ellipse if we have enough points
+                if len(contour) >= 5:
+                    try:
+                        ellipse = cv2.fitEllipse(contour)
+                        # Draw the fitted ellipse for smoother circles
+                        cv2.ellipse(new_mask, ellipse, 255, -1)
+                    except cv2.error:
+                        # Fallback to approximated contour
+                        cv2.drawContours(new_mask, [approx], -1, 255, -1)
+                else:
+                    cv2.drawContours(new_mask, [approx], -1, 255, -1)
+            else:
+                # Mixed shape - use moderate smoothing
+                epsilon = 0.01 * perimeter
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                cv2.drawContours(new_mask, [approx], -1, 255, -1)
+        
+        # Handle holes (hierarchy level 1)
+        if hierarchy is not None:
+            for i, contour in enumerate(contours):
+                # Check if this is a hole (has a parent)
+                if hierarchy[0][i][3] != -1:
+                    if cv2.contourArea(contour) >= 50:
+                        perimeter = cv2.arcLength(contour, True)
+                        if perimeter > 0:
+                            epsilon = 0.01 * perimeter
+                            approx = cv2.approxPolyDP(contour, epsilon, True)
+                            cv2.drawContours(new_mask, [approx], -1, 0, -1)  # Cut out hole
+        
+        # Apply the vectorized mask
+        img_result[new_mask > 0] = color_bgr
+    
+    print(f"  Processed {total_contours_processed} contours")
+    return img_result
+
+
+def _snap_to_right_angles(approx):
+    """
+    Snap a 4-point polygon's angles to 90 degrees if they're close.
+    This creates perfectly rectangular shapes.
+    """
+    if len(approx) != 4:
+        return approx
+    
+    points = approx.reshape(4, 2).astype(np.float32)
+    
+    # Calculate angles at each corner
+    angles = []
+    for i in range(4):
+        p1 = points[(i - 1) % 4]
+        p2 = points[i]
+        p3 = points[(i + 1) % 4]
+        
+        v1 = p1 - p2
+        v2 = p3 - p2
+        
+        # Calculate angle
+        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
+        cos_angle = np.clip(cos_angle, -1, 1)
+        angle = np.arccos(cos_angle) * 180 / np.pi
+        angles.append(angle)
+    
+    # Check if all angles are close to 90 degrees (within 15 degrees)
+    all_right_angles = all(75 < angle < 105 for angle in angles)
+    
+    if all_right_angles:
+        # Fit a minimum area rectangle to get perfectly straight edges
+        rect = cv2.minAreaRect(approx)
+        box = cv2.boxPoints(rect)
+        return np.int0(box).reshape(-1, 1, 2)
+    
+    return approx
+
+
+def smooth_jagged_edges(img):
+    """
+    Apply final edge smoothing to remove remaining jaggedness.
+    Uses a combination of morphological operations and contour smoothing.
+    """
+    print("Smoothing jagged edges for final cleanup...")
+    
+    img_result = img.copy()
+    
+    # Process each color region
+    for color_name, color_bgr in PALETTE.items():
+        if color_name in ['sky_blue', 'black']:
+            continue
+            
+        color_bgr = np.array(color_bgr, dtype=np.uint8)
+        
+        # Find pixels of this color
+        mask = np.all(img == color_bgr, axis=2).astype(np.uint8) * 255
+        
+        if np.sum(mask) < 100:
+            continue
+        
+        # Apply morphological smoothing
+        # Opening removes small protrusions (bumps outward)
+        # Closing removes small intrusions (bumps inward)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        
+        # Opening followed by closing for balanced smoothing
+        smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
+        
+        # Apply Gaussian blur then threshold to smooth edges
+        blurred = cv2.GaussianBlur(smoothed, (3, 3), 0)
+        _, final_mask = cv2.threshold(blurred, 127, 255, cv2.THRESH_BINARY)
+        
+        # Update result
+        img_result[final_mask > 0] = color_bgr
+    
+    return img_result
+
+
 def solidify_color_regions(img, kernel_size=5):
     """
     Apply median filter within each color region to remove gradients and texture.
@@ -603,13 +805,20 @@ def restore_image(image_path, output_dir):
     # Phase 4e: Normalize outline widths for consistency
     img_uniform = uniform_outline_width(img_despecked)
     
-    # Phase 4f: Edge-preserving smooth to reduce jaggedness without filling areas
-    img_smooth_outlines = edge_preserving_smooth(img_uniform)
+    # Phase 4f: Vectorize edges for clean, vector-like appearance
+    # Straightens rectangles while preserving curves/circles
+    img_vectorized = vectorize_edges(img_uniform)
     
-    # Phase 4g: Apply anti-aliasing for smoother color transitions
+    # Phase 4g: Smooth jagged edges for final cleanup
+    img_smooth_edges = smooth_jagged_edges(img_vectorized)
+    
+    # Phase 4h: Edge-preserving smooth to reduce any remaining jaggedness
+    img_smooth_outlines = edge_preserving_smooth(img_smooth_edges)
+    
+    # Phase 4i: Apply anti-aliasing for smoother color transitions
     img_antialiased = apply_anti_aliasing(img_smooth_outlines)
     
-    # Phase 4h: Solidify color regions (remove any remaining texture)
+    # Phase 4j: Solidify color regions (remove any remaining texture)
     img_solid = solidify_color_regions(img_antialiased)
     
     # Phase 5: Downscale back to original size
@@ -621,6 +830,9 @@ def restore_image(image_path, output_dir):
     
     # Phase 7: Final spec removal at output resolution
     img_final = remove_isolated_specs(img_final, min_area=20)
+    
+    # Phase 8: Final edge smoothing at output resolution
+    img_final = smooth_jagged_edges(img_final)
     
     # Save output
     input_filename = Path(image_path).stem
