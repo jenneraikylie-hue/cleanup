@@ -48,12 +48,12 @@ def load_and_upscale(image_path, scale=3):
 
 
 def detect_stars(img):
-    """Detect star-shaped objects (5-pointed white polygons)."""
+    """Detect star-shaped objects (5-pointed white polygons) including incomplete stars at edges."""
     print("Detecting stars...")
     
-    # Create mask for bright white regions
+    # Create mask for bright white regions (lowered threshold to catch near-white)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, white_mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
+    _, white_mask = cv2.threshold(gray, 230, 255, cv2.THRESH_BINARY)
     
     # Find contours
     contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -68,15 +68,15 @@ def detect_stars(img):
             perimeter = cv2.arcLength(contour, True)
             approx = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
             
-            # Check for star-like shape (8-12 vertices for 5-pointed star with concave points)
-            if 8 <= len(approx) <= 14:
-                # Check convexity (stars are non-convex)
+            # Check for star-like shape (more lenient: 5-14 vertices to catch incomplete stars)
+            if 5 <= len(approx) <= 14:
+                # Check convexity (stars are non-convex) - relaxed criteria
                 hull = cv2.convexHull(contour)
                 hull_area = cv2.contourArea(hull)
                 if hull_area > 0:
                     solidity = area / hull_area
-                    # Stars have low solidity due to concave points
-                    if 0.4 < solidity < 0.75:
+                    # Stars have low solidity due to concave points - more lenient range
+                    if 0.3 < solidity < 0.85:
                         cv2.drawContours(star_mask, [contour], -1, 255, -1)
     
     print(f"Star mask created: {np.sum(star_mask > 0)} pixels")
@@ -84,31 +84,37 @@ def detect_stars(img):
 
 
 def detect_text(img):
-    """Detect small high-contrast text regions."""
+    """Detect small high-contrast text regions - improved to better preserve white text."""
     print("Detecting text...")
     
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # Use adaptive threshold to detect high-contrast details
+    # Create a mask for near-white regions (text is often white)
+    _, white_text_mask = cv2.threshold(gray, 230, 255, cv2.THRESH_BINARY)
+    
+    # Also use adaptive threshold to detect high-contrast details
     binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                    cv2.THRESH_BINARY_INV, 11, 2)
     
+    # Combine both masks
+    combined_binary = cv2.bitwise_or(binary, white_text_mask)
+    
     # Find contours
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(combined_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     text_mask = np.zeros(img.shape[:2], dtype=np.uint8)
     
     for contour in contours:
         area = cv2.contourArea(contour)
-        # Text is typically small to medium sized
-        if 50 < area < 20000:
+        # Text is typically small to medium sized (expanded range to catch more text)
+        if 30 < area < 30000:
             x, y, w, h = cv2.boundingRect(contour)
             aspect_ratio = w / float(h) if h > 0 else 0
             
-            # Text typically has certain aspect ratios
-            if 0.1 < aspect_ratio < 10:
-                # Expand bounding box slightly to protect text
-                padding = 5
+            # Text typically has certain aspect ratios (expanded range)
+            if 0.08 < aspect_ratio < 15:
+                # Expand bounding box more to ensure text protection
+                padding = 8
                 x1 = max(0, x - padding)
                 y1 = max(0, y - padding)
                 x2 = min(img.shape[1], x + w + padding)
@@ -221,9 +227,46 @@ def clean_background(img, bg_mask):
     return img_clean
 
 
+def preprocess_special_colors(img):
+    """Pre-process special color ranges before palette snapping."""
+    print("\n=== Pre-processing Special Colors ===")
+    
+    img_processed = img.copy()
+    
+    # 1. Snap near-white colors (RGB 244-255) to pure white
+    # In BGR format: checking all channels are >= 244
+    near_white_mask = np.all(img >= 244, axis=2)
+    img_processed[near_white_mask] = [255, 255, 255]
+    near_white_count = np.sum(near_white_mask)
+    print(f"  Near-white pixels converted to pure white: {near_white_count:,}")
+    
+    # 2. Snap blue glare colors to sky_blue
+    # Define blue glare color ranges (BGR format)
+    sky_blue = np.array(PALETTE['sky_blue'], dtype=np.uint8)
+    
+    # Blue glare examples from user (converted RGB to BGR):
+    # RGB(152, 198, 247) -> BGR(247, 198, 152)
+    # RGB(175, 214, 253) -> BGR(253, 214, 175)
+    # RGB(161, 205, 252) -> BGR(252, 205, 161)
+    # RGB(185, 212, 247) -> BGR(247, 212, 185)
+    
+    # Create mask for blue glare: light blue colors (high B, medium G, low-medium R in BGR)
+    # Characteristics: B > 230, G > 180, R > 140, and B is highest channel
+    b, g, r = cv2.split(img)
+    blue_glare_mask = (b > 230) & (g > 180) & (r > 140) & (b > g) & (b > r)
+    img_processed[blue_glare_mask] = sky_blue
+    blue_glare_count = np.sum(blue_glare_mask)
+    print(f"  Blue glare pixels snapped to sky_blue: {blue_glare_count:,}")
+    
+    return img_processed
+
+
 def snap_to_palette(img, protection_mask):
     """Snap all colors to the nearest palette color using vectorized operations."""
     print("\n=== Phase 3: Color Quantization ===")
+    
+    # Pre-process special color ranges
+    img = preprocess_special_colors(img)
     
     img_float = img.astype(np.float32)
     h, w = img.shape[:2]
