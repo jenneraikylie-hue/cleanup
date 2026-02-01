@@ -24,6 +24,12 @@ PALETTE = {
     'black':         (0, 0, 0)         # Void/Scan Edges
 }
 
+# Special color detection thresholds
+NEAR_WHITE_THRESHOLD = 244  # RGB values >= this are snapped to pure white
+BLUE_GLARE_B_THRESHOLD = 230  # Blue channel threshold for glare detection
+BLUE_GLARE_G_THRESHOLD = 180  # Green channel threshold for glare detection
+BLUE_GLARE_R_THRESHOLD = 140  # Red channel threshold for glare detection
+
 # Convert palette to arrays for vectorized operations
 PALETTE_ARRAY = np.array(list(PALETTE.values()), dtype=np.float32)
 PALETTE_NAMES = list(PALETTE.keys())
@@ -234,8 +240,8 @@ def preprocess_special_colors(img):
     img_processed = img.copy()
     
     # 1. Snap near-white colors (RGB 244-255) to pure white
-    # In BGR format: checking all channels are >= 244
-    near_white_mask = np.all(img >= 244, axis=2)
+    # In BGR format: checking all channels are >= NEAR_WHITE_THRESHOLD
+    near_white_mask = np.all(img >= NEAR_WHITE_THRESHOLD, axis=2)
     img_processed[near_white_mask] = [255, 255, 255]
     near_white_count = np.sum(near_white_mask)
     print(f"  Near-white pixels converted to pure white: {near_white_count:,}")
@@ -251,9 +257,12 @@ def preprocess_special_colors(img):
     # RGB(185, 212, 247) -> BGR(247, 212, 185)
     
     # Create mask for blue glare: light blue colors (high B, medium G, low-medium R in BGR)
-    # Characteristics: B > 230, G > 180, R > 140, and B is highest channel
+    # Characteristics: B > threshold, G > threshold, R > threshold, and B is highest channel
     b, g, r = cv2.split(img)
-    blue_glare_mask = (b > 230) & (g > 180) & (r > 140) & (b > g) & (b > r)
+    blue_glare_mask = (b > BLUE_GLARE_B_THRESHOLD) & \
+                      (g > BLUE_GLARE_G_THRESHOLD) & \
+                      (r > BLUE_GLARE_R_THRESHOLD) & \
+                      (b > g) & (b > r)
     img_processed[blue_glare_mask] = sky_blue
     blue_glare_count = np.sum(blue_glare_mask)
     print(f"  Blue glare pixels snapped to sky_blue: {blue_glare_count:,}")
