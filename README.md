@@ -1,19 +1,53 @@
 # Vinyl Playmat Digital Restoration Tool
 
-A robust Python script for digitally restoring high-resolution scans of vintage vinyl playmats. Removes wrinkles, glare, and texture while preserving logos, text, stars, and silhouettes with accurate colors.
+A Python script for digitally restoring high-resolution scans of vintage vinyl playmats. Removes wrinkles, glare, and texture while preserving logos, text, stars, and silhouettes with accurate colors.
 
-## Features
+## Two Implementations Available
 
-- **Background Replacement**: Completely flattens the vinyl texture by replacing the sky blue background with a single solid color
-- **Object Protection**: Automatically detects and preserves:
-  - Stars (5-pointed white polygons)
-  - Small text (numbers, instructions, copyright)
-  - Logo layers (white/pink/purple sandwich structure)
-- **Glare Removal**: Eliminates specular highlights and reflections
-- **Wrinkle Removal**: Removes shadows and texture from the background
-- **Color Quantization**: Maps all colors to a specific palette using Euclidean distance
-- **Edge Preservation**: Uses bilateral filtering to maintain sharp outlines
-- **Anti-Aliasing**: Smooths color boundaries to prevent jagged edges
+### 🌟 HSV-Based Detection (Recommended) - `restore_playmat_hsv.py`
+
+Uses HSV color space for robust, lighting-invariant color detection.
+
+**Key Advantages:**
+- ✅ No posterization or harsh color shifts
+- ✅ Correct under varying lighting (handles blue-biased scans)
+- ✅ Natural logo layer separation (white/pink/purple) by brightness
+- ✅ Simpler ranges (one per color family)
+- ✅ Better edge preservation
+
+**Usage:**
+```bash
+python restore_playmat_hsv.py scan.jpg          # Single image
+python restore_playmat_hsv.py scans/            # Whole directory
+```
+
+📖 **Technical Details:** See [HSV_APPROACH.md](HSV_APPROACH.md)
+
+### 🔧 BGR Threshold Detection (Legacy) - `restore_playmat.py`
+
+Uses direct BGR channel thresholds based on measured ranges from actual scans.
+
+**Characteristics:**
+- 13 source color categories → 9 palette colors
+- Separate ranges for variations (glare, dirt, clean background)
+- May struggle with lighting variation
+- Backup implementation for reference
+
+**Usage:**
+```bash
+python restore_playmat.py scan.jpg              # Single image
+python restore_playmat.py scans/                # Whole directory
+```
+
+## Features (Both Versions)
+
+- **Flat Color Output**: Perfect vector-style appearance with zero texture
+- **Object Protection**: Preserves stars, text, and logos via shape detection
+- **Logo Preservation**: Maintains 3-layer structure (white/pink/purple)
+- **Edge-Preserving Smoothing**: Bilateral filtering keeps outlines sharp
+- **Color Quantization**: 9-color palette with exact color matching
+- **Batch Processing**: Process directories of images automatically
+- **3x Upscale Workflow**: Internal processing at 3x resolution for quality
 
 ## Master Color Palette (BGR Format)
 
@@ -26,132 +60,89 @@ PALETTE = {
     'neon_green':    (0, 213, 197),    # Silhouette Outlines
     'dark_purple':   (140, 0, 180),    # Outer Logo Border
     'vibrant_red':   (1, 13, 245),     # Ladder Accents
-    'deep_teal':     (10, 176, 149),   # Small Text/Shadows
-    'black':         (0, 0, 0)         # Void/Scan Edges
+    'deep_teal':     (10, 176, 149),   # Small Text
+    'black':         (0, 0, 0)         # Deadspace
 }
 ```
 
 ## Requirements
 
-- Python 3.7 or later
-- OpenCV (cv2)
+- Python 3.7+
+- OpenCV
 - NumPy
 
-## Installation
-
-### Automatic (Windows)
-
-1. Double-click `run_cleanup.bat`
-2. The script will automatically install dependencies if needed
-
-### Manual
-
+**Install:**
 ```bash
 pip install opencv-python numpy
 ```
 
-## Usage
+## Windows Quick Launch
 
-### Quick Start (Windows)
-
-1. Place your JPG images in the same folder as the scripts
-2. Double-click `run_cleanup.bat`
-3. Restored PNG files will be saved to the `restored` folder
-
-### Command Line Usage
-
-**Process all JPG images in current directory:**
 ```bash
-python restore_playmat.py
+run_cleanup.bat  # Auto-installs dependencies, runs HSV version
 ```
 
-**Process a specific image:**
-```bash
-python restore_playmat.py input.jpg output.png
-```
+## Processing Pipeline (HSV Version)
 
-**Process all images in a specific directory:**
-```bash
-python restore_playmat.py /path/to/images /path/to/output
-```
+### Phase 1: Load & Upscale
+- Load image and upscale 3x for better processing
 
-## Processing Pipeline
+### Phase 2: HSV Color Detection
+- Convert to HSV color space
+- Detect colors by hue (yellow=20-40°, green=40-80°, pink=140-170°, etc.)
+- Use saturation to separate white from blue background
+- Use value to differentiate hot pink (bright) from dark purple (shadow)
+- Edge detection restricts green to outlines only
 
-### Phase 1: Pre-Processing & Detection
-1. Load image and upscale 3x for better processing
-2. Detect and protect stars (5-pointed white polygons)
-3. Detect and protect text (high-contrast small details)
-4. Detect and protect logos (pink/white/purple regions)
+### Phase 3: Cleaning & Quantization
+- **3a**: Bilateral filter (edge-preserving smoothing)
+- **3b**: Morphological cleanup (noise removal)
+- **3c**: Snap to exact palette colors
+- **3d**: Solidify regions with median filter (removes texture)
 
-### Phase 2: Background Cleaning
-1. Identify sky blue background region using LAB color space
-2. Remove protected areas from background mask
-3. Replace entire background with flat sky_blue color (233, 180, 130)
-
-### Phase 3: Color Quantization & Restoration
-1. Apply bilateral filter for edge-preserving smoothing
-2. Snap all pixels to nearest palette color (vectorized operation)
-3. Reinforce neon green outlines on silhouettes
-4. Fill single-pixel holes (salt-and-pepper noise removal)
-
-### Phase 4: Final Polish
-1. Apply anti-aliasing to color boundaries
-2. Downscale back to original resolution
-3. Save as lossless PNG
-
-## Special Handling
-
-### The "Steps" Logo (Sandwich Structure)
-The logo has three distinct layers that are preserved:
-- **Center**: Pure White
-- **Middle**: Hot Pink
-- **Outer**: Dark Purple (kept separate from pink)
-
-### Stars
-- Detected by shape (5 points, low solidity)
-- Differentiated from glare (which is irregular)
-- Protected from background replacement
-
-### Silhouettes
-- Yellow fill with neon green outline
-- Outline thickness preserved with bilateral filtering
-- Interior solidly filled with no gradients
-
-### Text
-- Small high-contrast regions protected
-- Not eroded by morphological operations
-- Remains legible after processing
+### Phase 4: Downscale & Finalize
+- Downscale to original resolution
+- Final palette enforcement for 100% color accuracy
 
 ## Output
 
-- Format: PNG (lossless compression)
-- Resolution: Same as input
-- Color depth: 8-bit per channel
-- Result: Clean, flat-color "vector-style" image with no texture or artifacts
+- **Format**: PNG (lossless)
+- **Quality**: 100% exact palette colors, zero texture/noise
+- **Appearance**: Clean vector-style flat colors
+- **Location**: `output/` directory with `_cleaned.png` suffix
 
-## Performance Tips
+## Documentation
 
-- Images are automatically upscaled 3x during processing for better accuracy
-- Processing time depends on image resolution (typically 30-60 seconds per image)
-- Large batches can be processed unattended
+- [HSV_APPROACH.md](HSV_APPROACH.md) - Technical explanation of HSV method
+- [HSV_IMPLEMENTATION_PLAN.md](HSV_IMPLEMENTATION_PLAN.md) - Implementation planning
+- [AI_REVIEW_IMPLEMENTATION.md](AI_REVIEW_IMPLEMENTATION.md) - Color range analysis
+- [FIXES_SUMMARY.md](FIXES_SUMMARY.md) - Issue resolution history
+- [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) - Usage examples
+- [SECURITY_SUMMARY.md](SECURITY_SUMMARY.md) - Security analysis
 
 ## Troubleshooting
 
-**"Python is not installed"**
-- Install Python from https://www.python.org/
-- Make sure to check "Add Python to PATH" during installation
+**Posterized or wrong colors:**
+- Use `restore_playmat_hsv.py` (recommended)
+- Check that input images are well-lit scans
 
-**"Failed to install dependencies"**
-- Manually run: `pip install opencv-python numpy`
-- You may need to use `pip3` instead of `pip` on some systems
+**Green appearing in block fills:**
+- HSV version restricts green to edges only
+- BGR version may need adjustment
 
-**Output has artifacts**
-- Ensure input images are high resolution (at least 1000x1000 pixels)
-- Check that the input format is JPG
+**White elements turning blue:**
+- HSV version handles this better (saturation-based detection)
+- Ensures S<50 for white detection
 
-**Colors don't match palette**
-- The script automatically snaps all colors to the nearest palette color
-- If results are unexpected, check the lighting and exposure of your scans
+**Logo layers not visible:**
+- HSV version uses value-based separation
+- Hot pink (V>180) vs dark purple (V≤180)
+
+## Performance
+
+- Typical: 30-60 seconds per image (depends on resolution)
+- Batch processing supported for unattended operation
+- 3x upscaling means memory usage scales with image size
 
 ## License
 
