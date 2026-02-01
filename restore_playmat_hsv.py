@@ -79,17 +79,27 @@ def preprocess_with_hsv(img):
     vibrant_red = np.array(PALETTE['vibrant_red'], dtype=np.uint8)
     neon_green = np.array(PALETTE['neon_green'], dtype=np.uint8)
     black = np.array(PALETTE['black'], dtype=np.uint8)
+    outline_magenta = np.array(PALETTE['outline_magenta'], dtype=np.uint8)
     
-    # ==== 1. WHITE ELEMENTS (stars, logos, text) ====
-    # White has low saturation and high value
-    # CRITICAL: Must be lenient to catch blue-tinted whites from lighting
-    # Range: S < 80 (was 50), V > 180 (was 200) - catches RGB(205-250, 227-255, 245-255)
-    white_mask = (s < 80) & (v > 180)
+    # ==== 1. BLUE BACKGROUND FIRST (to prevent shadow blues becoming white) ====
+    # Blue hue: 90-130 degrees
+    # CRITICAL: Process blue BEFORE white to catch shadow blues correctly
+    # Expanded range to catch all blue variations including darker shadow blues
+    blue_mask = (h >= 85) & (h <= 135) & (s > 20) & (v > 50)
+    img_processed[blue_mask] = sky_blue
+    blue_count = np.sum(blue_mask)
+    print(f"  Blue background (all): {blue_count:,} pixels → sky_blue")
+    
+    # ==== 2. WHITE ELEMENTS (stars, logos, text) ====
+    # White has very low saturation and very high value
+    # CRITICAL: Very strict to avoid false positives - only true whites
+    # Must NOT be in the blue hue range (already processed above)
+    white_mask = (s < 35) & (v > 220) & ~blue_mask
     img_processed[white_mask] = pure_white
     white_count = np.sum(white_mask)
     print(f"  White elements: {white_count:,} pixels → pure_white")
     
-    # ==== 2. YELLOW ELEMENTS (silhouettes, text, with glare variations) ====
+    # ==== 3. YELLOW ELEMENTS (silhouettes, text, with glare variations) ====
     # Yellow hue in HSV: 20-40 degrees (out of 180 in OpenCV)
     # Covers all yellow variations (silhouettes, text, glare)
     yellow_mask = (h >= 20) & (h <= 40) & (s > 100) & (v > 100)
@@ -97,51 +107,44 @@ def preprocess_with_hsv(img):
     yellow_count = np.sum(yellow_mask)
     print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
-    # ==== 3. NEON GREEN (outlines around silhouettes) ====
-    # Green hue: 40-80 degrees
-    # CRITICAL: Don't be too restrictive - actual green outlines need to be preserved
-    # Lower saturation threshold to catch all green variations
-    green_mask = (h >= 40) & (h <= 80) & (s > 60) & (v > 80)
+    # ==== 4. NEON GREEN (outlines around silhouettes) ====
+    # Green hue: 35-85 degrees (expanded range)
+    # CRITICAL: Expanded range and lowered thresholds to catch all green outline variations
+    green_mask = (h >= 35) & (h <= 85) & (s > 40) & (v > 60)
     img_processed[green_mask] = neon_green
     green_count = np.sum(green_mask)
     print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
     
-    # ==== 4. PINK/MAGENTA ELEMENTS (hot pink and dark purple) ====
-    # Pink/Magenta hue: 140-170 degrees (wrapped around 180)
-    # CRITICAL: Logo has 3 layers - white (already done), hot pink, dark purple
-    pink_hue_mask = ((h >= 140) & (h <= 170)) & (s > 80)
+    # ==== 5. PINK/MAGENTA ELEMENTS (hot pink, outline magenta, and dark purple) ====
+    # Pink/Magenta hue: 140-175 degrees (expanded range for outline_magenta)
+    # CRITICAL: Logo has layers - white, hot pink, outline_magenta, dark purple
+    pink_hue_mask = ((h >= 140) & (h <= 175)) & (s > 70)
     
-    # Differentiate by value to preserve logo sandwich:
-    # Hot pink (bright): V > 160 (lowered from 180)
-    # Dark purple (outer layer): 100 < V <= 160
-    hot_pink_mask = pink_hue_mask & (v > 160)
-    dark_purple_mask = pink_hue_mask & (v > 80) & (v <= 160)
+    # Differentiate by value to preserve all pink layers:
+    # Hot pink (brightest): V > 200, very saturated - the main pink color
+    # Outline magenta (medium): 120 < V <= 200 - rgb(219, 0, 149) darker outlines
+    # Dark purple (darkest): 60 < V <= 120 - outer border
+    hot_pink_mask = pink_hue_mask & (v > 200)
+    outline_magenta_mask = pink_hue_mask & (v > 120) & (v <= 200)
+    dark_purple_mask = pink_hue_mask & (v > 60) & (v <= 120)
     
     img_processed[hot_pink_mask] = hot_pink
+    img_processed[outline_magenta_mask] = outline_magenta
     img_processed[dark_purple_mask] = dark_purple
     
     pink_count = np.sum(hot_pink_mask)
+    magenta_count = np.sum(outline_magenta_mask)
     purple_count = np.sum(dark_purple_mask)
     print(f"  Hot pink: {pink_count:,} pixels → hot_pink")
+    print(f"  Outline magenta: {magenta_count:,} pixels → outline_magenta")
     print(f"  Dark purple: {purple_count:,} pixels → dark_purple")
     
-    # ==== 5. RED ELEMENTS (vibrant red) ====
+    # ==== 6. RED ELEMENTS (vibrant red) ====
     # Red hue: 0-10 or 170-180 degrees (wraps around)
-    red_mask = ((h >= 0) & (h <= 10) | (h >= 170) & (h <= 180)) & (s > 150) & (v > 200)
+    red_mask = (((h >= 0) & (h <= 10)) | ((h >= 170) & (h <= 180))) & (s > 150) & (v > 200)
     img_processed[red_mask] = vibrant_red
     red_count = np.sum(red_mask)
     print(f"  Vibrant red: {red_count:,} pixels → vibrant_red")
-    
-    # ==== 6. BLUE BACKGROUND (all variations: clean, glare, dirt) ====
-    # Blue hue: 90-130 degrees
-    # CRITICAL: Must NOT overwrite whites! Only process pixels not already white
-    # Increase saturation threshold to avoid catching low-sat (white-ish) blues
-    blue_mask = (h >= 90) & (h <= 130) & (s > 50) & (v > 80)
-    # Don't overwrite whites
-    blue_mask = blue_mask & (s >= 80)  # Exclude low-saturation (white) pixels
-    img_processed[blue_mask] = sky_blue
-    blue_count = np.sum(blue_mask)
-    print(f"  Blue background (all): {blue_count:,} pixels → sky_blue")
     
     # ==== 7. BLACK/DEADSPACE ====
     # Very low value
@@ -153,23 +156,29 @@ def preprocess_with_hsv(img):
     return img_processed
 
 
-def bilateral_smooth_edges(img, d=9, sigma_color=75, sigma_space=75):
-    """Apply bilateral filter to smooth texture while preserving edges."""
+def bilateral_smooth_edges(img, d=15, sigma_color=100, sigma_space=100):
+    """
+    Apply bilateral filter to smooth texture while preserving edges.
+    Increased parameters for stronger smoothing of pixelated outlines.
+    """
     print("Applying bilateral filter for edge-preserving smoothing...")
     smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
     return smoothed
 
 
-def morphological_cleanup(img, kernel_size=3):
-    """Apply morphological operations to clean up noise."""
+def morphological_cleanup(img, kernel_size=5):
+    """
+    Apply morphological operations to clean up noise and smooth outlines.
+    Removes small specs and smooths pixelated edges.
+    """
     print(f"Applying morphological cleanup (kernel={kernel_size})...")
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     
-    # Closing to fill small holes
-    closed = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # Opening first to remove small noise/specs (like white dots)
+    opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel, iterations=2)
     
-    # Opening to remove small noise
-    cleaned = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=1)
+    # Closing to fill small holes and smooth outlines
+    cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
     
     return cleaned
 
