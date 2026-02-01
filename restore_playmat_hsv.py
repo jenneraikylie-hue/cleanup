@@ -81,8 +81,9 @@ def preprocess_with_hsv(img):
     
     # ==== 1. WHITE ELEMENTS (stars, logos, text) ====
     # White has low saturation and high value
-    # Range: S < 50, V > 200
-    white_mask = (s < 50) & (v > 200)
+    # CRITICAL: Must be lenient to catch blue-tinted whites from lighting
+    # Range: S < 80 (was 50), V > 180 (was 200) - catches RGB(205-250, 227-255, 245-255)
+    white_mask = (s < 80) & (v > 180)
     img_processed[white_mask] = pure_white
     white_count = np.sum(white_mask)
     print(f"  White elements: {white_count:,} pixels → pure_white")
@@ -95,31 +96,25 @@ def preprocess_with_hsv(img):
     yellow_count = np.sum(yellow_mask)
     print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
-    # ==== 3. NEON GREEN (outline only) ====
+    # ==== 3. NEON GREEN (outlines around silhouettes) ====
     # Green hue: 40-80 degrees
-    # Only process if it's an edge (use Canny edge detection)
-    green_hue_mask = (h >= 40) & (h <= 80) & (s > 100)
-    
-    # Detect edges
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150)
-    edges_dilated = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=1)
-    
-    # Green only where there are edges
-    green_mask = green_hue_mask & (edges_dilated > 0)
+    # CRITICAL: Don't be too restrictive - actual green outlines need to be preserved
+    # Lower saturation threshold to catch all green variations
+    green_mask = (h >= 40) & (h <= 80) & (s > 60) & (v > 80)
     img_processed[green_mask] = neon_green
     green_count = np.sum(green_mask)
     print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
     
     # ==== 4. PINK/MAGENTA ELEMENTS (hot pink and dark purple) ====
     # Pink/Magenta hue: 140-170 degrees (wrapped around 180)
-    pink_hue_mask = ((h >= 140) & (h <= 170)) & (s > 100)
+    # CRITICAL: Logo has 3 layers - white (already done), hot pink, dark purple
+    pink_hue_mask = ((h >= 140) & (h <= 170)) & (s > 80)
     
-    # Differentiate by value:
-    # Hot pink (bright): V > 180
-    # Dark purple (shadow): V < 180
-    hot_pink_mask = pink_hue_mask & (v > 180)
-    dark_purple_mask = pink_hue_mask & (v <= 180) & (v > 100)
+    # Differentiate by value to preserve logo sandwich:
+    # Hot pink (bright): V > 160 (lowered from 180)
+    # Dark purple (outer layer): 100 < V <= 160
+    hot_pink_mask = pink_hue_mask & (v > 160)
+    dark_purple_mask = pink_hue_mask & (v > 80) & (v <= 160)
     
     img_processed[hot_pink_mask] = hot_pink
     img_processed[dark_purple_mask] = dark_purple
@@ -138,8 +133,11 @@ def preprocess_with_hsv(img):
     
     # ==== 6. BLUE BACKGROUND (all variations: clean, glare, dirt) ====
     # Blue hue: 90-130 degrees
-    # All blue pixels go to sky_blue (clean, glare, dirt)
-    blue_mask = (h >= 90) & (h <= 130) & (s > 30)
+    # CRITICAL: Must NOT overwrite whites! Only process pixels not already white
+    # Increase saturation threshold to avoid catching low-sat (white-ish) blues
+    blue_mask = (h >= 90) & (h <= 130) & (s > 50) & (v > 80)
+    # Don't overwrite whites
+    blue_mask = blue_mask & (s >= 80)  # Exclude low-saturation (white) pixels
     img_processed[blue_mask] = sky_blue
     blue_count = np.sum(blue_mask)
     print(f"  Blue background (all): {blue_count:,} pixels → sky_blue")
