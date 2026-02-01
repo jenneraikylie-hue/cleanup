@@ -400,6 +400,145 @@ def edge_preserving_smooth(img, sigma_color=75, sigma_space=75):
     return smoothed
 
 
+def remove_isolated_specs(img, min_area=50):
+    """
+    Remove small isolated color specs that appear as noise.
+    Uses connected component analysis per color channel to find and remove
+    small disconnected regions that are likely artifacts.
+    """
+    print(f"Removing isolated specs (min_area={min_area})...")
+    
+    img_clean = img.copy()
+    specs_removed = 0
+    
+    # Process each palette color
+    for color_name, color_bgr in PALETTE.items():
+        # Skip background colors and black
+        if color_name in ['sky_blue', 'black']:
+            continue
+            
+        color_bgr = np.array(color_bgr, dtype=np.uint8)
+        
+        # Find pixels of this color
+        mask = np.all(img == color_bgr, axis=2).astype(np.uint8) * 255
+        
+        if np.sum(mask) == 0:
+            continue
+        
+        # Find connected components
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        
+        # Find components that are too small (isolated specs)
+        for i in range(1, num_labels):  # Skip background (label 0)
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < min_area:
+                # This is an isolated spec - replace with surrounding color
+                spec_mask = (labels == i)
+                
+                # Find the most common neighboring color (excluding this color)
+                # Dilate the spec mask to find neighbors
+                dilated = cv2.dilate(spec_mask.astype(np.uint8) * 255, 
+                                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+                neighbor_mask = (dilated > 0) & ~spec_mask
+                
+                if np.sum(neighbor_mask) > 0:
+                    # Get neighboring pixels
+                    neighbor_colors = img[neighbor_mask]
+                    
+                    # Find most common neighbor color
+                    unique_colors, counts = np.unique(neighbor_colors, axis=0, return_counts=True)
+                    most_common_idx = np.argmax(counts)
+                    replacement_color = unique_colors[most_common_idx]
+                    
+                    # Replace the spec with neighbor color
+                    img_clean[spec_mask] = replacement_color
+                    specs_removed += 1
+    
+    print(f"  Removed {specs_removed} isolated specs")
+    return img_clean
+
+
+def apply_anti_aliasing(img):
+    """
+    Apply subtle anti-aliasing effect to color boundaries for smoother appearance.
+    Uses guided filter to smooth transitions while maintaining sharp edges.
+    """
+    print("Applying anti-aliasing for smoother color transitions...")
+    
+    # Convert to float for processing
+    img_float = img.astype(np.float32) / 255.0
+    
+    # Apply guided filter (edge-aware smoothing)
+    # This smooths the image while preserving strong edges
+    radius = 2
+    eps = 0.01
+    
+    # Process each channel
+    smoothed = np.zeros_like(img_float)
+    for c in range(3):
+        # Use the channel itself as the guide
+        guide = img_float[:, :, c]
+        src = img_float[:, :, c]
+        
+        # Box filter computations for guided filter
+        mean_guide = cv2.boxFilter(guide, -1, (radius*2+1, radius*2+1))
+        mean_src = cv2.boxFilter(src, -1, (radius*2+1, radius*2+1))
+        corr_guide = cv2.boxFilter(guide * guide, -1, (radius*2+1, radius*2+1))
+        corr_guide_src = cv2.boxFilter(guide * src, -1, (radius*2+1, radius*2+1))
+        
+        var_guide = corr_guide - mean_guide * mean_guide
+        cov_guide_src = corr_guide_src - mean_guide * mean_src
+        
+        a = cov_guide_src / (var_guide + eps)
+        b = mean_src - a * mean_guide
+        
+        mean_a = cv2.boxFilter(a, -1, (radius*2+1, radius*2+1))
+        mean_b = cv2.boxFilter(b, -1, (radius*2+1, radius*2+1))
+        
+        smoothed[:, :, c] = mean_a * guide + mean_b
+    
+    # Convert back to uint8
+    result = (smoothed * 255).clip(0, 255).astype(np.uint8)
+    
+    return result
+
+
+def uniform_outline_width(img):
+    """
+    Normalize outline widths for consistent, professional appearance.
+    Uses morphological operations to create uniform outline thickness.
+    """
+    print("Normalizing outline widths for consistency...")
+    
+    img_result = img.copy()
+    
+    # Define outline colors
+    outline_colors = {
+        'neon_green': PALETTE['neon_green'],
+        'outline_magenta': PALETTE['outline_magenta'],
+        'dark_purple': PALETTE['dark_purple'],
+        'vibrant_red': PALETTE['vibrant_red']
+    }
+    
+    for color_name, color_bgr in outline_colors.items():
+        color_bgr = np.array(color_bgr, dtype=np.uint8)
+        
+        # Find pixels of this outline color
+        mask = np.all(img == color_bgr, axis=2).astype(np.uint8) * 255
+        
+        if np.sum(mask) < 1000:  # Skip if very few pixels
+            continue
+        
+        # Apply morphological closing to fill small gaps in outlines
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask_closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        
+        # Apply the smoothed mask
+        img_result[mask_closed > 0] = color_bgr
+    
+    return img_result
+
+
 def solidify_color_regions(img, kernel_size=5):
     """
     Apply median filter within each color region to remove gradients and texture.
@@ -458,11 +597,20 @@ def restore_image(image_path, output_dir):
     # Phase 4c: Snap to exact palette colors
     img_quantized = snap_to_palette(img_cleaned)
     
-    # Phase 4d: Edge-preserving smooth to reduce jaggedness without filling areas
-    img_smooth_outlines = edge_preserving_smooth(img_quantized)
+    # Phase 4d: Remove isolated specs (white dots, color noise)
+    img_despecked = remove_isolated_specs(img_quantized, min_area=50)
     
-    # Phase 4e: Solidify color regions (remove any remaining texture)
-    img_solid = solidify_color_regions(img_smooth_outlines)
+    # Phase 4e: Normalize outline widths for consistency
+    img_uniform = uniform_outline_width(img_despecked)
+    
+    # Phase 4f: Edge-preserving smooth to reduce jaggedness without filling areas
+    img_smooth_outlines = edge_preserving_smooth(img_uniform)
+    
+    # Phase 4g: Apply anti-aliasing for smoother color transitions
+    img_antialiased = apply_anti_aliasing(img_smooth_outlines)
+    
+    # Phase 4h: Solidify color regions (remove any remaining texture)
+    img_solid = solidify_color_regions(img_antialiased)
     
     # Phase 5: Downscale back to original size
     print(f"Downscaling to original size: {original_size}")
@@ -470,6 +618,9 @@ def restore_image(image_path, output_dir):
     
     # Phase 6: Final palette enforcement
     img_final = snap_to_palette(img_final)
+    
+    # Phase 7: Final spec removal at output resolution
+    img_final = remove_isolated_specs(img_final, min_area=20)
     
     # Save output
     input_filename = Path(image_path).stem
