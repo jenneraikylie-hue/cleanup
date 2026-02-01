@@ -1,10 +1,10 @@
 @echo off
 REM Vinyl Playmat Digital Restoration - Quick Launcher
-REM This batch file launches the Python restoration script
+REM This batch file launches the HSV-based restoration script (recommended)
 
-echo ===================================
-echo Vinyl Playmat Restoration Tool
-echo ===================================
+echo ============================================
+echo Vinyl Playmat Restoration Tool (HSV Mode)
+echo ============================================
 echo.
 
 REM Check if Python is installed
@@ -36,13 +36,16 @@ if errorlevel 1 (
     echo.
 )
 
-REM Run the restoration script
-echo Starting image restoration...
-echo Processing all JPG images in current directory...
-echo Output will be saved to "restored" folder
+REM Run the HSV-based restoration script
+echo Starting HSV-based image restoration...
+echo Processing all images in current directory...
+echo Output will be saved to "output" folder
+echo.
+echo Using HSV color space for robust detection
+echo (For legacy BGR version, run: python restore_playmat.py)
 echo.
 
-python restore_playmat.py
+python restore_playmat_hsv.py .
 
 if errorlevel 1 (
     echo.
@@ -52,9 +55,9 @@ if errorlevel 1 (
 )
 
 echo.
-echo ===================================
+echo ============================================
 echo Processing Complete!
-echo ===================================
-echo Check the "restored" folder for output files
+echo ============================================
+echo Check the "output" folder for cleaned images
 echo.
 pause
