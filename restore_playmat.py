@@ -242,57 +242,112 @@ def clean_background(img, bg_mask):
 
 
 def preprocess_special_colors(img):
-    """Pre-process special color ranges before palette snapping."""
+    """Pre-process special color ranges before palette snapping using user-provided samples."""
     print("\n=== Pre-processing Special Colors ===")
     
     img_processed = img.copy()
+    b, g, r = cv2.split(img)
     
-    # 1. Snap near-white colors (all channels >= 205) to pure white
-    # IMPORTANT: This must happen FIRST to protect near-white colors from being misclassified as blue glare
-    # In BGR format: checking all channels are >= NEAR_WHITE_THRESHOLD
-    near_white_mask = np.all(img >= NEAR_WHITE_THRESHOLD, axis=2)
-    img_processed[near_white_mask] = [255, 255, 255]
-    near_white_count = np.sum(near_white_mask)
-    print(f"  Near-white pixels converted to pure white: {near_white_count:,}")
-    
-    # 2. Snap blue glare colors to sky_blue (AFTER near-white to avoid conflicts)
-    # Define blue glare color ranges (BGR format)
+    # Palette colors
+    pure_white = np.array(PALETTE['pure_white'], dtype=np.uint8)
     sky_blue = np.array(PALETTE['sky_blue'], dtype=np.uint8)
+    bright_yellow = np.array(PALETTE['bright_yellow'], dtype=np.uint8)
+    hot_pink = np.array(PALETTE['hot_pink'], dtype=np.uint8)
+    dark_purple = np.array(PALETTE['dark_purple'], dtype=np.uint8)
+    vibrant_red = np.array(PALETTE['vibrant_red'], dtype=np.uint8)
+    neon_green = np.array(PALETTE['neon_green'], dtype=np.uint8)
     
-    # Blue glare examples from user (converted RGB to BGR):
-    # RGB(152, 198, 247) -> BGR(247, 198, 152)
-    # RGB(175, 214, 253) -> BGR(253, 214, 175)
-    # RGB(161, 205, 252) -> BGR(252, 205, 161)
-    # RGB(185, 212, 247) -> BGR(247, 212, 185)
+    # 1. WHITE ELEMENTS: All channels >= 205 (stars, logos, text)
+    # User samples: RGB(205-254, 227-255, 248-255)
+    near_white_mask = np.all(img >= 205, axis=2)
+    img_processed[near_white_mask] = pure_white
+    white_count = np.sum(near_white_mask)
+    print(f"  White elements: {white_count:,} pixels")
     
-    # Create mask for blue glare: light blue colors (high B, medium-high G, medium to moderately-high R in BGR)
-    # Characteristics: B > 230, G > 180, 140 < R < 205 (R must be lower than near-white to differentiate)
-    # and B is highest channel
-    b, g, r = cv2.split(img_processed)  # Use processed image to avoid re-detecting near-white
-    blue_glare_mask = (b > BLUE_GLARE_B_THRESHOLD) & \
-                      (g > BLUE_GLARE_G_THRESHOLD) & \
-                      (r > BLUE_GLARE_R_THRESHOLD) & \
-                      (r < BLUE_GLARE_R_MAX) & \
+    # Update channels from processed image
+    b, g, r = cv2.split(img_processed)
+    
+    # 2. BLUE BACKGROUND - GLARE: High B (233-253), High G (199-214), Medium R (157-185)
+    # User samples show B is always highest, R is lowest
+    blue_glare_mask = (b >= 233) & (b <= 253) & \
+                      (g >= 199) & (g <= 214) & \
+                      (r >= 157) & (r <= 185) & \
                       (b > g) & (b > r)
     img_processed[blue_glare_mask] = sky_blue
-    blue_glare_count = np.sum(blue_glare_mask)
-    print(f"  Blue glare pixels snapped to sky_blue: {blue_glare_count:,}")
     
-    # 3. Snap near-yellow colors to bright_yellow (fixes scanner edge gradients)
-    # Bright yellow is BGR(1, 252, 253): very low R, very high G and B
-    bright_yellow = np.array(PALETTE['bright_yellow'], dtype=np.uint8)
+    # 3. BLUE BACKGROUND - DIRT: Medium-High B (183-210), Medium G (154-167), Low-Medium R (120-131)
+    # These are darker than glare but still light blue
+    blue_dirt_mask = (b >= 183) & (b <= 210) & \
+                     (g >= 154) & (g <= 167) & \
+                     (r >= 120) & (r <= 131) & \
+                     (b > g) & (b > r)
+    img_processed[blue_dirt_mask] = sky_blue
     
-    # Create mask for near-yellow: high G and B, low R
-    # This catches yellowish-green gradients at scan edges that should be solid yellow
-    b, g, r = cv2.split(img_processed)  # Use processed image to avoid conflicts
-    near_yellow_mask = (g > NEAR_YELLOW_G_THRESHOLD) & \
-                       (b > NEAR_YELLOW_B_THRESHOLD) & \
-                       (r < NEAR_YELLOW_R_MAX) & \
-                       (g > r) & (b > r)  # G and B must both be higher than R
-    img_processed[near_yellow_mask] = bright_yellow
-    near_yellow_count = np.sum(near_yellow_mask)
-    print(f"  Near-yellow pixels snapped to bright_yellow: {near_yellow_count:,}")
+    glare_dirt_count = np.sum(blue_glare_mask) + np.sum(blue_dirt_mask)
+    print(f"  Blue glare/dirt -> sky_blue: {glare_dirt_count:,} pixels")
     
+    # Update channels
+    b, g, r = cv2.split(img_processed)
+    
+    # 4. YELLOW VARIATIONS: BGR(0-23, 196-255, 196-255) - very low B, very high G and R
+    # Includes clean yellow, dirt, and glare
+    yellow_mask = (b >= 0) & (b <= 30) & \
+                  (g >= 196) & (g <= 255) & \
+                  (r >= 196) & (r <= 255) & \
+                  (g > b) & (r > b)
+    img_processed[yellow_mask] = bright_yellow
+    yellow_count = np.sum(yellow_mask)
+    print(f"  Yellow variations -> bright_yellow: {yellow_count:,} pixels")
+    
+    # Update channels
+    b, g, r = cv2.split(img_processed)
+    
+    # 5. HOT PINK: Very low G (0-60), High B and R (191-212, 196-255)
+    # Includes both solid pink and lighter pink outlines
+    hot_pink_mask = (g >= 0) & (g <= 60) & \
+                    (b >= 191) & (b <= 220) & \
+                    (r >= 196) & (r <= 255)
+    img_processed[hot_pink_mask] = hot_pink
+    pink_count = np.sum(hot_pink_mask)
+    print(f"  Hot pink variations -> hot_pink: {pink_count:,} pixels")
+    
+    # Update channels
+    b, g, r = cv2.split(img_processed)
+    
+    # 6. DARK PURPLE (darker pink outline): Low G (0-20), Medium-High B (163-188), Medium-High R (200-237)
+    # These have lower B values than hot pink
+    dark_purple_mask = (g >= 0) & (g <= 20) & \
+                       (b >= 163) & (b <= 188) & \
+                       (r >= 200) & (r <= 237)
+    img_processed[dark_purple_mask] = dark_purple
+    purple_count = np.sum(dark_purple_mask)
+    print(f"  Dark purple outline -> dark_purple: {purple_count:,} pixels")
+    
+    # Update channels
+    b, g, r = cv2.split(img_processed)
+    
+    # 7. VIBRANT RED: Very low G (0-13), Very low B (0-5), Very high R (245-255)
+    red_mask = (g >= 0) & (g <= 13) & \
+               (b >= 0) & (b <= 5) & \
+               (r >= 245) & (r <= 255)
+    img_processed[red_mask] = vibrant_red
+    red_count = np.sum(red_mask)
+    print(f"  Vibrant red -> vibrant_red: {red_count:,} pixels")
+    
+    # Update channels
+    b, g, r = cv2.split(img_processed)
+    
+    # 8. NEON GREEN (lime outline): Low B (5-87), High G (183-214), Medium-High R (155-199)
+    # The outline around yellow silhouettes
+    green_mask = (b >= 5) & (b <= 87) & \
+                 (g >= 183) & (g <= 214) & \
+                 (r >= 155) & (r <= 199) & \
+                 (g > b) & (g > r)
+    img_processed[green_mask] = neon_green
+    green_count = np.sum(green_mask)
+    print(f"  Neon green outline -> neon_green: {green_count:,} pixels")
+    
+    return img_processed
     return img_processed
 
 
