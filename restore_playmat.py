@@ -32,9 +32,10 @@ BLUE_GLARE_R_THRESHOLD = 140  # Red channel threshold for glare detection
 
 # Yellow edge gradient thresholds (for scanner edge artifacts)
 # Bright yellow is BGR(1, 252, 253), so we look for high G and B, very low R
-NEAR_YELLOW_G_THRESHOLD = 180  # Green channel threshold for yellow detection (lowered from 200)
-NEAR_YELLOW_B_THRESHOLD = 180  # Blue channel threshold for yellow detection (lowered from 200)
-NEAR_YELLOW_R_MAX = 120  # Red channel must be below this for yellow (raised from 100)
+# Thresholds tuned to catch yellowish-green gradients at scan edges
+NEAR_YELLOW_G_THRESHOLD = 180  # Green channel threshold for yellow detection
+NEAR_YELLOW_B_THRESHOLD = 180  # Blue channel threshold for yellow detection
+NEAR_YELLOW_R_MAX = 120  # Red channel must be below this for yellow
 
 # Convert palette to arrays for vectorized operations
 PALETTE_ARRAY = np.array(list(PALETTE.values()), dtype=np.float32)
@@ -368,6 +369,14 @@ def solidify_color_regions(img):
     
     result = img.copy()
     
+    # Apply median filter once for efficiency (reused for all color regions)
+    kernel_size = 7  # Larger kernel handles gradual scanner edge shading
+    img_median = cv2.medianBlur(img, kernel_size)
+    
+    # Minimum region size threshold: 1000 pixels (roughly 32x32 area)
+    # Avoids processing noise/small artifacts while catching all significant regions
+    MIN_REGION_SIZE = 1000
+    
     # For each major palette color, find its regions and apply median filter
     # This removes gradients within solid color areas while preserving edges
     for color_name, color_bgr in PALETTE.items():
@@ -380,12 +389,7 @@ def solidify_color_regions(img):
         # Create mask for this color (exact match)
         color_mask = np.all(img == color_arr, axis=2).astype(np.uint8)
         
-        if np.sum(color_mask) > 1000:  # Only process if significant region exists
-            # Apply median filter to smooth out gradients within this color region
-            # Use a larger kernel to handle gradual scanner edge shading
-            kernel_size = 7
-            img_median = cv2.medianBlur(img, kernel_size)
-            
+        if np.sum(color_mask) > MIN_REGION_SIZE:
             # Replace pixels of this color with median-filtered version
             # This removes gradients but the median filter preserves edges better than blur
             result[color_mask > 0] = img_median[color_mask > 0]
