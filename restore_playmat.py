@@ -30,6 +30,12 @@ BLUE_GLARE_B_THRESHOLD = 230  # Blue channel threshold for glare detection
 BLUE_GLARE_G_THRESHOLD = 180  # Green channel threshold for glare detection
 BLUE_GLARE_R_THRESHOLD = 140  # Red channel threshold for glare detection
 
+# Yellow edge gradient thresholds (for scanner edge artifacts)
+# Bright yellow is BGR(1, 252, 253), so we look for high G and B, very low R
+NEAR_YELLOW_G_THRESHOLD = 180  # Green channel threshold for yellow detection (lowered from 200)
+NEAR_YELLOW_B_THRESHOLD = 180  # Blue channel threshold for yellow detection (lowered from 200)
+NEAR_YELLOW_R_MAX = 120  # Red channel must be below this for yellow (raised from 100)
+
 # Convert palette to arrays for vectorized operations
 PALETTE_ARRAY = np.array(list(PALETTE.values()), dtype=np.float32)
 PALETTE_NAMES = list(PALETTE.keys())
@@ -267,6 +273,21 @@ def preprocess_special_colors(img):
     blue_glare_count = np.sum(blue_glare_mask)
     print(f"  Blue glare pixels snapped to sky_blue: {blue_glare_count:,}")
     
+    # 3. Snap near-yellow colors to bright_yellow (fixes scanner edge gradients)
+    # Bright yellow is BGR(1, 252, 253): very low R, very high G and B
+    bright_yellow = np.array(PALETTE['bright_yellow'], dtype=np.uint8)
+    
+    # Create mask for near-yellow: high G and B, low R
+    # This catches yellowish-green gradients at scan edges that should be solid yellow
+    b, g, r = cv2.split(img_processed)  # Use processed image to avoid conflicts
+    near_yellow_mask = (g > NEAR_YELLOW_G_THRESHOLD) & \
+                       (b > NEAR_YELLOW_B_THRESHOLD) & \
+                       (r < NEAR_YELLOW_R_MAX) & \
+                       (g > r) & (b > r)  # G and B must both be higher than R
+    img_processed[near_yellow_mask] = bright_yellow
+    near_yellow_count = np.sum(near_yellow_mask)
+    print(f"  Near-yellow pixels snapped to bright_yellow: {near_yellow_count:,}")
+    
     return img_processed
 
 
@@ -341,6 +362,38 @@ def fill_holes(img):
     return result
 
 
+def solidify_color_regions(img):
+    """Solidify color regions to remove scanner edge gradients and shading artifacts."""
+    print("\n=== Phase 3d: Solidifying Color Regions ===")
+    
+    result = img.copy()
+    
+    # For each major palette color, find its regions and apply median filter
+    # This removes gradients within solid color areas while preserving edges
+    for color_name, color_bgr in PALETTE.items():
+        # Skip black (usually borders/edges we want to keep sharp)
+        if color_name == 'black':
+            continue
+        
+        color_arr = np.array(color_bgr, dtype=np.uint8)
+        
+        # Create mask for this color (exact match)
+        color_mask = np.all(img == color_arr, axis=2).astype(np.uint8)
+        
+        if np.sum(color_mask) > 1000:  # Only process if significant region exists
+            # Apply median filter to smooth out gradients within this color region
+            # Use a larger kernel to handle gradual scanner edge shading
+            kernel_size = 7
+            img_median = cv2.medianBlur(img, kernel_size)
+            
+            # Replace pixels of this color with median-filtered version
+            # This removes gradients but the median filter preserves edges better than blur
+            result[color_mask > 0] = img_median[color_mask > 0]
+    
+    print("Color regions solidified")
+    return result
+
+
 def apply_edge_antialiasing(img):
     """Apply slight anti-aliasing to color boundaries."""
     print("\n=== Phase 4: Applying Edge Anti-Aliasing ===")
@@ -393,9 +446,10 @@ def process_image(input_path, output_path=None):
     # Phase 3: Outline Reinforcement and Hole Filling
     img_reinforced = reinforce_outlines(img_snapped)
     img_filled = fill_holes(img_reinforced)
+    img_solidified = solidify_color_regions(img_filled)
     
     # Phase 4: Final Polish
-    img_final = apply_edge_antialiasing(img_filled)
+    img_final = apply_edge_antialiasing(img_solidified)
     
     # Downscale back to original size
     print(f"\n=== Downscaling back to original size: {original_size} ===")
