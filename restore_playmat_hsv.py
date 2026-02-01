@@ -104,20 +104,22 @@ def preprocess_with_hsv(img):
     # - Lime green outline: HSL 67-70° → OpenCV hue ~33-35
     # - Colors like #96be45, #b5cd00, #a9cb1b have hue around 33-35 in OpenCV scale
     # CRITICAL: Process green BEFORE yellow to preserve outline detail
-    # Green range: 33-85° to catch lime-green outlines (HSL 66+)
-    green_mask = (h >= 33) & (h <= 85) & (s > 30) & (v > 50)
+    # Green range: 34-85° to catch lime-green outlines (HSL 68+), starts at 34 to avoid block yellow
+    green_mask = (h >= 34) & (h <= 85) & (s > 30) & (v > 50)
     img_processed[green_mask] = neon_green
     green_count = np.sum(green_mask)
     print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
     
-    # ==== 4. YELLOW ELEMENTS (silhouettes, text, with glare variations) ====
+    # ==== 4. YELLOW ELEMENTS (silhouettes, blocks, ladder text, with glare variations) ====
     # Based on provided color samples:
+    # - Block yellow (infill): HSL 59-60° → OpenCV hue ~29-30 (#FBFB00, #FAF900, #F8F800)
+    #   Very high saturation (100%), high value (49%)
     # - Golden orange: HSL 58-59° → OpenCV hue ~29-30 (#FEF900, #FFFA00)
     # - Yellow silhouette inside: HSL 62-63° → OpenCV hue ~31 (#DFE801, #DCE803)
-    # Yellow hue in HSV: 20-32 degrees to capture all yellow variations
+    # Yellow hue in HSV: 20-33 degrees to capture all yellow variations including block yellow
     # CRITICAL: Process AFTER green to preserve green outlines around yellow silhouettes
     # Exclude pixels already marked as green
-    yellow_mask = (h >= 20) & (h <= 32) & (s > 80) & (v > 100) & ~green_mask
+    yellow_mask = (h >= 20) & (h <= 33) & (s > 80) & (v > 100) & ~green_mask
     img_processed[yellow_mask] = bright_yellow
     yellow_count = np.sum(yellow_mask)
     print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
