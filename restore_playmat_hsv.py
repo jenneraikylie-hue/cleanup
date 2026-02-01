@@ -358,72 +358,19 @@ def snap_to_palette(img):
     return quantized
 
 
-def smooth_outline_contours(img, outline_colors=['neon_green', 'outline_magenta', 'dark_purple']):
+def edge_preserving_smooth(img, sigma_color=75, sigma_space=75):
     """
-    Smooth outline colors by refining their contours to create clean, persistent lines.
-    Uses contour approximation to reduce jaggedness while maintaining shape.
+    Apply edge-preserving smoothing to reduce jaggedness on outlines
+    without filling in or expanding color regions.
+    Uses bilateral filter which preserves edges while smoothing within regions.
     """
-    print("Smoothing outline contours for clean persistent lines...")
+    print("Applying edge-preserving smoothing for clean outlines...")
     
-    img_smoothed = img.copy()
+    # Bilateral filter smooths within regions while preserving edges
+    # This is less aggressive than contour-based smoothing and won't fill areas
+    smoothed = cv2.bilateralFilter(img, d=9, sigmaColor=sigma_color, sigmaSpace=sigma_space)
     
-    for color_name in outline_colors:
-        if color_name not in PALETTE:
-            continue
-            
-        color_bgr = np.array(PALETTE[color_name], dtype=np.uint8)
-        
-        # Find pixels of this color
-        mask = np.all(img == color_bgr, axis=2).astype(np.uint8) * 255
-        
-        # Count region size
-        num_pixels = np.sum(mask > 0)
-        
-        if num_pixels < 100:
-            continue
-        
-        # Find contours of this color region
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if len(contours) == 0:
-            continue
-        
-        # Create new smooth mask
-        smooth_mask = np.zeros_like(mask)
-        
-        for contour in contours:
-            # Skip very small contours
-            if cv2.contourArea(contour) < 50:
-                continue
-            
-            # Approximate contour to smooth it
-            # epsilon controls smoothing: higher = smoother but less detail
-            perimeter = cv2.arcLength(contour, True)
-            epsilon = 0.002 * perimeter  # Small epsilon preserves detail while smoothing jaggies
-            
-            smooth_contour = cv2.approxPolyDP(contour, epsilon, True)
-            
-            # Draw smoothed contour
-            cv2.drawContours(smooth_mask, [smooth_contour], -1, 255, -1)
-        
-        # Apply Gaussian blur to further smooth edges
-        smooth_mask = cv2.GaussianBlur(smooth_mask, (5, 5), 0)
-        
-        # Threshold back to binary
-        _, smooth_mask = cv2.threshold(smooth_mask, 127, 255, cv2.THRESH_BINARY)
-        
-        # Apply morphological operations to clean up
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        smooth_mask = cv2.morphologyEx(smooth_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-        smooth_mask = cv2.morphologyEx(smooth_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        
-        # Apply the smoothed mask
-        smooth_pixels = smooth_mask > 0
-        img_smoothed[smooth_pixels] = color_bgr
-        
-        print(f"  Smoothed {color_name}: {np.sum(smooth_pixels):,} pixels")
-    
-    return img_smoothed
+    return smoothed
 
 
 def solidify_color_regions(img, kernel_size=5):
@@ -484,8 +431,8 @@ def restore_image(image_path, output_dir):
     # Phase 4c: Snap to exact palette colors
     img_quantized = snap_to_palette(img_cleaned)
     
-    # Phase 4d: Smooth outline contours for clean persistent lines
-    img_smooth_outlines = smooth_outline_contours(img_quantized)
+    # Phase 4d: Edge-preserving smooth to reduce jaggedness without filling areas
+    img_smooth_outlines = edge_preserving_smooth(img_quantized)
     
     # Phase 4e: Solidify color regions (remove any remaining texture)
     img_solid = solidify_color_regions(img_smooth_outlines)
