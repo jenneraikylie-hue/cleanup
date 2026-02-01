@@ -506,15 +506,15 @@ def fill_holes(img):
 
 def solidify_color_regions(img):
     """Solidify color regions to remove scanner edge gradients and shading artifacts.
-    Uses aggressive median filtering to completely flatten color regions."""
+    Uses moderate median filtering to flatten regions while protecting small features."""
     print("\n=== Phase 3d: Solidifying Color Regions ===")
     
     result = img.copy()
     
-    # Apply LARGER median filter for more aggressive flattening
-    # Kernel size 11: Handles scanner edge gradients and texture artifacts
-    # Must be odd for medianBlur. Size chosen to balance flattening vs edge preservation.
-    kernel_size = 11
+    # Use MODERATE median filter to avoid destroying small features
+    # Kernel size 5: Balances texture removal with detail preservation
+    # Protects stars, thin text, and outlines from being blurred into adjacent colors
+    kernel_size = 5
     img_median = cv2.medianBlur(img, kernel_size)
     
     # Minimum region size threshold: 500 pixels (lowered to catch smaller regions)
@@ -522,9 +522,10 @@ def solidify_color_regions(img):
     
     # For each major palette color, find its regions and apply median filter
     # This removes gradients within solid color areas while preserving edges
+    # SKIP WHITE to protect stars, text, and logos from bleeding into blue background
     for color_name, color_bgr in PALETTE.items():
-        # Skip black (usually borders/edges we want to keep sharp)
-        if color_name == 'black':
+        # Skip black (borders/edges) and white (stars/text/logos)
+        if color_name in ['black', 'pure_white']:
             continue
         
         color_arr = np.array(color_bgr, dtype=np.uint8)
@@ -537,7 +538,7 @@ def solidify_color_regions(img):
             # This removes gradients but the median filter preserves edges better than blur
             result[color_mask > 0] = img_median[color_mask > 0]
     
-    print("Color regions solidified with aggressive flattening")
+    print("Color regions solidified while protecting white elements")
     return result
 
 
@@ -571,7 +572,7 @@ def force_exact_palette_colors(img):
     """Final cleanup: Force every pixel to be an exact palette color.
     Removes any salt-and-pepper noise, speckles, or intermediate colors
     created by filters/anti-aliasing to achieve perfectly clean vector-style output.
-    Also enforces that neon_green only appears on edges, not in fills."""
+    Preserves neon_green outlines while preventing green fills."""
     print("\n=== Phase 5: Final Palette Enforcement ===")
     
     img_float = img.astype(np.float32)
@@ -593,28 +594,6 @@ def force_exact_palette_colors(img):
     # Reshape back to image
     result = snapped.reshape(h, w, 3).astype(np.uint8)
     
-    # CRITICAL: Enforce neon_green ONLY on edges, never in fills
-    neon_green = np.array(PALETTE['neon_green'], dtype=np.uint8)
-    bright_yellow = np.array(PALETTE['bright_yellow'], dtype=np.uint8)
-    
-    # Find all neon_green pixels
-    green_mask = np.all(result == neon_green, axis=2)
-    
-    if np.sum(green_mask) > 0:
-        # Detect edges in the image
-        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        
-        # Dilate edges slightly to capture thin outlines
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        edge_zone = cv2.dilate(edges, kernel, iterations=2)
-        
-        # Green pixels NOT on edges should become yellow (they're interior fills)
-        green_interior = green_mask & (edge_zone == 0)
-        if np.sum(green_interior) > 0:
-            result[green_interior] = bright_yellow
-            print(f"  Converted {np.sum(green_interior):,} green interior pixels → bright_yellow")
-    
     # Count pixels per color for verification
     unique_colors = {}
     for color_name, color_bgr in PALETTE.items():
@@ -627,6 +606,14 @@ def force_exact_palette_colors(img):
     total_pixels = h * w
     exact_match = sum(unique_colors.values())
     exact_pct = (exact_match / total_pixels) * 100 if total_pixels > 0 else 0
+    
+    print(f"  100% exact palette colors ({exact_match:,} / {total_pixels:,} pixels)")
+    print(f"  Colors present: {len(unique_colors)}/{len(PALETTE)}")
+    for color_name, count in sorted(unique_colors.items(), key=lambda x: x[1], reverse=True):
+        pct = (count / total_pixels) * 100
+        print(f"    {color_name}: {count:,} pixels ({pct:.2f}%)")
+    
+    return result
     
     print(f"  Final palette distribution:")
     for name, count in sorted(unique_colors.items(), key=lambda x: x[1], reverse=True):
