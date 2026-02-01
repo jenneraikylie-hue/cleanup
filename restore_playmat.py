@@ -179,7 +179,7 @@ def create_protection_mask(img):
 
 def detect_background_region(img, protection_mask):
     """Detect the sky blue background region."""
-    print("\n=== Phase 2: Detecting Background Region ===")
+    print("\n=== Phase 2a: Detecting Background Region ===")
     
     sky_blue = np.array(PALETTE['sky_blue'], dtype=np.float32)
     
@@ -209,7 +209,7 @@ def detect_background_region(img, protection_mask):
 
 def clean_background(img, bg_mask):
     """Replace background with flat sky blue, removing glare and wrinkles."""
-    print("\n=== Phase 2: Cleaning Background (The Background Nuke) ===")
+    print("\n=== Phase 2b: Cleaning Background (The Background Nuke) ===")
     
     img_clean = img.copy()
     sky_blue = np.array(PALETTE['sky_blue'], dtype=np.uint8)
@@ -250,7 +250,7 @@ def snap_to_palette(img, protection_mask):
 
 def reinforce_outlines(img):
     """Reinforce silhouette outlines and logo borders."""
-    print("\n=== Phase 3: Reinforcing Outlines ===")
+    print("\n=== Phase 3b: Reinforcing Outlines ===")
     
     # Apply bilateral filter to preserve edges while smoothing
     img_smooth = cv2.bilateralFilter(img, 9, 75, 75)
@@ -273,7 +273,7 @@ def reinforce_outlines(img):
 
 def fill_holes(img):
     """Fill single-pixel holes inside solid color regions."""
-    print("\n=== Phase 3: Filling Holes ===")
+    print("\n=== Phase 3c: Filling Holes ===")
     
     # Use morphological closing to fill small holes
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -425,7 +425,7 @@ def main():
         # Process directory
         output_dir = None
         if len(sys.argv) >= 3:
-            output_dir = sys.argv[3]
+            output_dir = sys.argv[2]
         process_directory(str(path_obj), output_dir)
     
     print("\n" + "="*60)
