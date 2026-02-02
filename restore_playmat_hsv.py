@@ -168,11 +168,9 @@ def preprocess_with_hsv(img):
         if stats[i, cv2.CC_STAT_AREA] >= min_component_area:
             green_mask_clean[labels == i] = 255
     
-    # Apply Gaussian blur then re-threshold to smooth the edges of the mask
-    # This creates professional-looking smooth outlines
-    green_mask_smooth = cv2.GaussianBlur(green_mask_clean, (3, 3), 0)
-    _, green_mask_final_uint8 = cv2.threshold(green_mask_smooth, 127, 255, cv2.THRESH_BINARY)
-    green_mask_final = green_mask_final_uint8 > 0
+    # SKIP Gaussian blur for green to prevent thickness stacking
+    # The blur was fattening strokes; just use the cleaned mask directly
+    green_mask_final = green_mask_clean > 0
     
     img_processed[green_mask_final] = neon_green
     green_count = np.sum(green_mask_final)
@@ -565,15 +563,15 @@ def uniform_outline_width(img):
     """
     Normalize outline widths for consistent, professional appearance.
     Uses morphological operations to create uniform outline thickness.
-    UPDATED: Prevent outline colors from expanding inward - only reinforce existing pixels.
+    UPDATED: Skip neon_green entirely to prevent thickness stacking.
     """
     print("Normalizing outline widths for consistency...")
     
     img_result = img.copy()
     
-    # Define outline colors
+    # Define outline colors - SKIP neon_green to prevent thickness stacking
+    # neon_green is already thin and should stay thin
     outline_colors = {
-        'neon_green': PALETTE['neon_green'],
         'outline_magenta': PALETTE['outline_magenta'],
         'dark_purple': PALETTE['dark_purple'],
         'vibrant_red': PALETTE['vibrant_red']
@@ -653,12 +651,12 @@ def vectorize_edges(img, straightness_threshold=0.001, min_contour_area=500):
             # Determine drawing mode: stroke for outline colors, fill for others
             if is_outline_color:
                 # Draw as STROKE, not fill - preserves outline nature
-                # UPDATED: Cap thickness to max 2-3px for neon_green to prevent dominance
-                # Green is an accent/halo, not a structural border
+                # UPDATED: Use thickness=1 for neon_green to match original thin accent look
+                # Green is a halo/accent, not a structural border
                 if color_name == 'neon_green':
-                    thickness = 2  # Fixed thin stroke for green
+                    thickness = 1  # Thin stroke for green accent
                 else:
-                    thickness = min(3, max(2, int(0.004 * perimeter)))  # Capped for other outlines
+                    thickness = min(2, max(1, int(0.003 * perimeter)))  # Thin for other outlines
                 epsilon = straightness_threshold * perimeter
                 approx = cv2.approxPolyDP(contour, epsilon, True)
                 cv2.drawContours(new_mask, [approx], -1, 255, thickness=thickness)
@@ -730,15 +728,15 @@ def smooth_jagged_edges(img):
     """
     Apply final edge smoothing to remove remaining jaggedness.
     Uses a combination of morphological operations and contour smoothing.
-    UPDATED: Outline colors only get closing (no opening) to preserve stroke topology.
+    UPDATED: Skip neon_green entirely to prevent thickness stacking.
     """
     print("Smoothing jagged edges for final cleanup...")
     
     img_result = img.copy()
     
     # Define outline colors that should be treated as strokes
-    outline_colors = {
-        'neon_green',
+    # SKIP neon_green entirely - it's already thin and any processing fattens it
+    outline_colors_to_process = {
         'outline_magenta',
         'dark_purple',
         'vibrant_red'
@@ -746,7 +744,8 @@ def smooth_jagged_edges(img):
     
     # Process each color region
     for color_name, color_bgr in PALETTE.items():
-        if color_name in ['sky_blue', 'black']:
+        # Skip background, black, and neon_green (to prevent thickness stacking)
+        if color_name in ['sky_blue', 'black', 'neon_green']:
             continue
             
         color_bgr = np.array(color_bgr, dtype=np.uint8)
@@ -760,7 +759,7 @@ def smooth_jagged_edges(img):
         # Apply morphological smoothing
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         
-        if color_name in outline_colors:
+        if color_name in outline_colors_to_process:
             # OUTLINES: only light closing to smooth gaps, no opening
             # Opening erodes thin strokes which destroys outline topology
             smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
