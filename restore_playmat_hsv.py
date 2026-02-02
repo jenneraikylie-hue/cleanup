@@ -99,57 +99,61 @@ def preprocess_with_hsv(img):
     blue_count = np.sum(blue_mask)
     print(f"  Blue background (all): {blue_count:,} pixels → sky_blue")
     
-    # ==== 3. NEON GREEN (outlines around silhouettes) - PROCESS BEFORE YELLOW ====
-    # Based on provided color samples:
-    # - Lime green outline: HSL 67-70° → OpenCV hue ~33-35
-    # - Colors like #96be45, #b5cd00, #a9cb1b have hue around 33-35 in OpenCV scale
-    # CRITICAL: Process green BEFORE yellow to preserve outline detail
-    # Green range: 33-85° to catch lime-green outlines (HSL 67+), lowered to 33 for better coverage
-    # Lowered saturation threshold to catch slightly desaturated green pixels
-    green_mask = (h >= 33) & (h <= 85) & (s > 25) & (v > 45)
+    # ==== 3. YELLOW ELEMENTS FIRST (silhouettes, blocks) ====
+    # Process yellow BEFORE green so we can derive green as an outline around yellow
+    # Yellow hue in HSV: 20-33 degrees
+    yellow_mask = (h >= 20) & (h <= 35) & (s > 70) & (v > 100)
     
-    # Apply morphological closing to fill gaps in green outlines
-    # This creates consistent, continuous outlines without jaggedness
-    green_mask_uint8 = green_mask.astype(np.uint8) * 255
-    green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    green_mask_closed = cv2.morphologyEx(green_mask_uint8, cv2.MORPH_CLOSE, green_close_kernel, iterations=2)
+    # Clean up yellow mask with morphological operations
+    yellow_mask_uint8 = yellow_mask.astype(np.uint8) * 255
+    yellow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    yellow_mask_closed = cv2.morphologyEx(yellow_mask_uint8, cv2.MORPH_CLOSE, yellow_kernel, iterations=2)
+    yellow_mask_opened = cv2.morphologyEx(yellow_mask_closed, cv2.MORPH_OPEN, yellow_kernel, iterations=1)
     
-    # Remove small disconnected "rogue" green pixels using connected component analysis
-    # This keeps only large connected regions (the actual outlines) and removes isolated pixels
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(green_mask_closed, connectivity=8)
+    # Fill holes in yellow regions
+    contours, _ = cv2.findContours(yellow_mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    yellow_filled = np.zeros_like(yellow_mask_opened)
+    cv2.drawContours(yellow_filled, contours, -1, 255, -1)
     
-    # Calculate minimum area threshold (keep components > 100 pixels)
-    min_component_area = 100
+    yellow_mask_final = yellow_filled > 0
+    img_processed[yellow_mask_final] = bright_yellow
+    yellow_count = np.sum(yellow_mask_final)
+    print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
-    # Create cleaned mask keeping only significant components
-    green_mask_clean = np.zeros_like(green_mask_closed)
-    for i in range(1, num_labels):  # Skip background (label 0)
-        if stats[i, cv2.CC_STAT_AREA] >= min_component_area:
-            green_mask_clean[labels == i] = 255
+    # ==== 4. NEON GREEN (derived as outside boundary of yellow) ====
+    # Green outline should ONLY exist on the outside edge of yellow, facing blue
+    # This ensures green is an accent/halo, not a fill
     
-    # Apply Gaussian blur then re-threshold to smooth the edges of the mask
-    # This creates professional-looking smooth outlines
-    green_mask_smooth = cv2.GaussianBlur(green_mask_clean, (5, 5), 0)
-    _, green_mask_final_uint8 = cv2.threshold(green_mask_smooth, 127, 255, cv2.THRESH_BINARY)
-    green_mask_final = green_mask_final_uint8 > 0
+    # Dilate yellow slightly to create an outer ring where green should live
+    green_ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    yellow_dilated_for_green = cv2.dilate(yellow_filled, green_ring_kernel, iterations=1)
+    
+    # The green ring is: dilated_yellow - original_yellow (the outer edge only)
+    green_ring = yellow_dilated_for_green & ~yellow_filled
+    
+    # Only keep green ring pixels that are adjacent to blue (the background)
+    # This ensures green only appears on the outside, not between touching yellow regions
+    blue_mask_uint8 = blue_mask.astype(np.uint8) * 255
+    blue_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    blue_dilated = cv2.dilate(blue_mask_uint8, blue_neighbor_kernel, iterations=1)
+    
+    # Green outline = ring pixels that touch blue
+    green_mask_final = (green_ring > 0) & (blue_dilated > 0)
+    
+    # Thin the green outline to 1-2 pixels using erosion
+    green_mask_uint8 = green_mask_final.astype(np.uint8) * 255
+    thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    green_mask_thinned = cv2.erode(green_mask_uint8, thin_kernel, iterations=1)
+    
+    # If erosion removed too much, use original
+    if np.sum(green_mask_thinned) < np.sum(green_mask_uint8) * 0.3:
+        green_mask_thinned = green_mask_uint8
+    
+    green_mask_final = green_mask_thinned > 0
     
     img_processed[green_mask_final] = neon_green
     green_count = np.sum(green_mask_final)
     print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
-    
-    # ==== 4. YELLOW ELEMENTS (silhouettes, blocks, ladder text, with glare variations) ====
-    # Based on provided color samples:
-    # - Block yellow (infill): HSL 59-60° → OpenCV hue ~29-30 (#FBFB00, #FAF900, #F8F800)
-    #   Very high saturation (100%), high value (49%)
-    # - Golden orange: HSL 58-59° → OpenCV hue ~29-30 (#FEF900, #FFFA00)
-    # - Yellow silhouette inside: HSL 62-63° → OpenCV hue ~31 (#DFE801, #DCE803)
-    # Yellow hue in HSV: 20-33 degrees to capture all yellow variations including block yellow
-    # CRITICAL: Process AFTER green to preserve green outlines around yellow silhouettes
-    # Exclude pixels already marked as green
-    yellow_mask = (h >= 20) & (h <= 33) & (s > 80) & (v > 100) & ~green_mask_final
-    img_processed[yellow_mask] = bright_yellow
-    yellow_count = np.sum(yellow_mask)
-    print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
     # ==== 5. PINK/MAGENTA ELEMENTS (hot pink, outline magenta, and dark purple) ====
     # Based on provided color samples:
@@ -205,10 +209,10 @@ def preprocess_with_hsv(img):
     return img_processed
 
 
-def bilateral_smooth_edges(img, d=15, sigma_color=100, sigma_space=100):
+def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50):
     """
     Apply bilateral filter to smooth texture while preserving edges.
-    Increased parameters for stronger smoothing of pixelated outlines.
+    UPDATED: Reduced parameters (d=9, sigma=50) to preserve thin outlines like green borders.
     """
     print("Applying bilateral filter for edge-preserving smoothing...")
     smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
@@ -323,41 +327,54 @@ def detect_text_regions(img):
     return protected_mask
 
 
-def morphological_cleanup(img, kernel_size=5, text_mask=None):
+def morphological_cleanup(img, kernel_size=3, text_mask=None):
     """
-    Apply morphological operations to clean up noise and smooth outlines.
-    Removes small specs and smooths pixelated edges.
-    If text_mask is provided, applies gentler processing to text regions.
+    Apply gentle morphological operations to clean up noise.
+    UPDATED: Reduced kernel size and iterations to preserve thin outlines.
     """
-    print(f"Applying morphological cleanup (kernel={kernel_size})...")
+    print(f"Applying gentle morphological cleanup (kernel={kernel_size})...")
+    
+    # Use a smaller kernel to avoid eating thin lines
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     
-    # Opening first to remove small noise/specs (like white dots)
-    opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel, iterations=2)
+    # 1. Opening: Removes small white noise. 
+    # Reduced to 1 iteration to prevent erasing thin outlines.
+    opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel, iterations=1)
     
-    # Closing to fill small holes and smooth outlines
-    cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # 2. Closing: Fills small dark holes.
+    cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=1)
     
     # If text mask provided, blend original with cleaned to preserve text
     if text_mask is not None:
         print("  Applying text protection - preserving original in text regions...")
-        # Use smaller kernel for text regions (gentler cleanup)
         text_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         text_cleaned = cv2.morphologyEx(img, cv2.MORPH_CLOSE, text_kernel, iterations=1)
         
-        # Create 3-channel mask for blending
         text_mask_3ch = cv2.cvtColor(text_mask, cv2.COLOR_GRAY2BGR)
         text_mask_float = text_mask_3ch.astype(np.float32) / 255.0
         
-        # Blend: use gentler cleanup for text regions, aggressive cleanup elsewhere
         cleaned = (text_mask_float * text_cleaned + (1 - text_mask_float) * cleaned).astype(np.uint8)
     
     return cleaned
 
 
-def snap_to_palette(img):
-    """Snap every pixel to the nearest palette color using Euclidean distance."""
+def snap_to_palette(img, protect_outlines=False):
+    """
+    Snap every pixel to the nearest palette color using Euclidean distance.
+    UPDATED: Can protect outline color pixels from being reassigned.
+    """
     print("Snapping to palette colors...")
+    
+    # If protecting outlines, save original outline pixels
+    outline_mask = None
+    original_img = None
+    if protect_outlines:
+        original_img = img.copy()
+        outline_colors = ['neon_green', 'outline_magenta', 'dark_purple', 'vibrant_red']
+        outline_mask = np.zeros(img.shape[:2], dtype=bool)
+        for color_name in outline_colors:
+            color_bgr = np.array(PALETTE[color_name], dtype=np.uint8)
+            outline_mask |= np.all(img == color_bgr, axis=2)
     
     # Reshape image to (num_pixels, 3)
     pixels = img.reshape(-1, 3).astype(np.float32)
@@ -374,6 +391,10 @@ def snap_to_palette(img):
     
     # Reshape back to image
     quantized = quantized_pixels.reshape(img.shape)
+    
+    # Restore protected outline pixels
+    if protect_outlines and outline_mask is not None:
+        quantized[outline_mask] = original_img[outline_mask]
     
     # Count pixels per color
     unique, counts = np.unique(closest_indices, return_counts=True)
@@ -507,14 +528,15 @@ def uniform_outline_width(img):
     """
     Normalize outline widths for consistent, professional appearance.
     Uses morphological operations to create uniform outline thickness.
+    UPDATED: Skip neon_green entirely to prevent thickness stacking.
     """
     print("Normalizing outline widths for consistency...")
     
     img_result = img.copy()
     
-    # Define outline colors
+    # Define outline colors - SKIP neon_green to prevent thickness stacking
+    # neon_green is already thin and should stay thin
     outline_colors = {
-        'neon_green': PALETTE['neon_green'],
         'outline_magenta': PALETTE['outline_magenta'],
         'dark_purple': PALETTE['dark_purple'],
         'vibrant_red': PALETTE['vibrant_red']
@@ -533,25 +555,34 @@ def uniform_outline_width(img):
         close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         mask_closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
         
-        # Apply the smoothed mask
-        img_result[mask_closed > 0] = color_bgr
+        # For outline colors, only reinforce existing pixels - don't expand inward
+        # This prevents green from flooding over yellow
+        original_color_mask = np.all(img == color_bgr, axis=2)
+        img_result[(mask_closed > 0) & original_color_mask] = color_bgr
     
     return img_result
 
 
-def vectorize_edges(img, straightness_threshold=0.02, min_contour_area=500):
+def vectorize_edges(img, straightness_threshold=0.001, min_contour_area=500):
     """
-    Create vector-like clean edges by:
-    1. Detecting straight lines and making them perfectly straight
-    2. Smoothing curves while preserving their shape
-    3. Creating clean, professional edges for all color regions
-    
-    This is shape-aware: rectangles get straight edges, circles stay curved.
+    Create vector-like clean edges.
+    UPDATED: Lower threshold (0.001) to preserve organic curves (hands, feet) 
+    while still sharpening blocky edges.
+    UPDATED: Treat outline colors (neon_green, outline_magenta, etc.) as STROKES,
+    not filled regions, to preserve the outline-on-fill layering.
     """
-    print("Vectorizing edges for clean, professional appearance...")
+    print("Vectorizing edges (High Fidelity Mode)...")
     
     img_result = img.copy()
     total_contours_processed = 0
+    
+    # Define outline colors that should be drawn as strokes, not fills
+    outline_color_names = {
+        'neon_green',
+        'outline_magenta',
+        'dark_purple',
+        'vibrant_red'
+    }
     
     # Process each palette color (except background and black)
     for color_name, color_bgr in PALETTE.items():
@@ -559,106 +590,64 @@ def vectorize_edges(img, straightness_threshold=0.02, min_contour_area=500):
             continue
             
         color_bgr = np.array(color_bgr, dtype=np.uint8)
-        
-        # Find pixels of this color
         mask = np.all(img == color_bgr, axis=2).astype(np.uint8) * 255
         
         if np.sum(mask) < min_contour_area:
             continue
         
-        # Find contours for this color region
         contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-        
         if not contours:
             continue
         
-        # Create new mask for vectorized version
         new_mask = np.zeros_like(mask)
+        is_outline_color = color_name in outline_color_names
         
         for i, contour in enumerate(contours):
-            if cv2.contourArea(contour) < 50:  # Skip tiny contours
+            if cv2.contourArea(contour) < 50: 
                 continue
             
             total_contours_processed += 1
-            
-            # Get contour perimeter
             perimeter = cv2.arcLength(contour, True)
             
-            if perimeter < 10:  # Skip tiny perimeters
-                cv2.drawContours(new_mask, [contour], -1, 255, -1)
-                continue
-            
-            # Approximate the contour with different epsilon values
-            # to determine if it's more line-like or curve-like
-            
-            # Try a rough approximation first
-            epsilon_rough = straightness_threshold * perimeter
+            # Check for rectangularity (Ladder rungs)
+            epsilon_rough = 0.02 * perimeter
             approx_rough = cv2.approxPolyDP(contour, epsilon_rough, True)
             
-            # Check if this is a roughly rectangular shape (4-6 vertices)
-            is_rectangular = 4 <= len(approx_rough) <= 6
-            
-            # Check for circularity
-            area = cv2.contourArea(contour)
-            if perimeter > 0:
-                circularity = 4 * np.pi * area / (perimeter * perimeter)
-            else:
-                circularity = 0
-            
-            is_circular = circularity > 0.7  # Circles have circularity close to 1
-            
-            if is_rectangular and not is_circular:
-                # This is a rectangular shape - use polygon approximation
-                # to create straight edges
-                epsilon = 0.015 * perimeter  # Tighter approximation for straighter edges
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-                
-                # For rectangles, ensure we have clean 90-degree corners
-                # by snapping angles to nearest 90 degrees if close
-                if len(approx) == 4:
-                    approx = _snap_to_right_angles(approx)
-                
-                cv2.drawContours(new_mask, [approx], -1, 255, -1)
-                
-            elif is_circular:
-                # This is a circular shape - preserve the curve
-                # Use a smoother approximation
-                epsilon = 0.005 * perimeter  # Very fine approximation to preserve curves
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-                
-                # Additionally, fit an ellipse if we have enough points
-                if len(contour) >= 5:
-                    try:
-                        ellipse = cv2.fitEllipse(contour)
-                        # Draw the fitted ellipse for smoother circles
-                        cv2.ellipse(new_mask, ellipse, 255, -1)
-                    except cv2.error:
-                        # Fallback to approximated contour
-                        cv2.drawContours(new_mask, [approx], -1, 255, -1)
+            # Determine drawing mode: stroke for outline colors, fill for others
+            if is_outline_color:
+                # Draw as STROKE, not fill - preserves outline nature
+                # UPDATED: Use thickness=1 for neon_green to match original thin accent look
+                # Green is a halo/accent, not a structural border
+                if color_name == 'neon_green':
+                    thickness = 1  # Thin stroke for green accent
                 else:
-                    cv2.drawContours(new_mask, [approx], -1, 255, -1)
+                    thickness = min(2, max(1, int(0.003 * perimeter)))  # Thin for other outlines
+                epsilon = straightness_threshold * perimeter
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                cv2.drawContours(new_mask, [approx], -1, 255, thickness=thickness)
+            elif len(approx_rough) == 4 and cv2.isContourConvex(approx_rough):
+                # If it's a simple rectangle, enforce straight lines (filled)
+                approx = _snap_to_right_angles(approx_rough)
+                cv2.drawContours(new_mask, [approx], -1, 255, -1)
             else:
-                # Mixed shape - use moderate smoothing
-                epsilon = 0.01 * perimeter
+                # If it's a complex shape (Figures, Footprints), PRESERVE CURVES (filled)
+                epsilon = straightness_threshold * perimeter 
                 approx = cv2.approxPolyDP(contour, epsilon, True)
                 cv2.drawContours(new_mask, [approx], -1, 255, -1)
         
-        # Handle holes (hierarchy level 1)
-        if hierarchy is not None:
+        # Handle holes (hierarchy level 1) - only for filled regions
+        if hierarchy is not None and not is_outline_color:
             for i, contour in enumerate(contours):
-                # Check if this is a hole (has a parent)
-                if hierarchy[0][i][3] != -1:
+                if hierarchy[0][i][3] != -1: # It's a hole
                     if cv2.contourArea(contour) >= 50:
                         perimeter = cv2.arcLength(contour, True)
-                        if perimeter > 0:
-                            epsilon = 0.01 * perimeter
-                            approx = cv2.approxPolyDP(contour, epsilon, True)
-                            cv2.drawContours(new_mask, [approx], -1, 0, -1)  # Cut out hole
+                        epsilon = 0.001 * perimeter # Keep holes precise
+                        approx = cv2.approxPolyDP(contour, epsilon, True)
+                        cv2.drawContours(new_mask, [approx], -1, 0, -1)
         
-        # Apply the vectorized mask
         img_result[new_mask > 0] = color_bgr
     
-    print(f"  Processed {total_contours_processed} contours")
+    print(f"  Processed {total_contours_processed} contours (High Fidelity)")
     return img_result
 
 
@@ -704,14 +693,24 @@ def smooth_jagged_edges(img):
     """
     Apply final edge smoothing to remove remaining jaggedness.
     Uses a combination of morphological operations and contour smoothing.
+    UPDATED: Skip neon_green entirely to prevent thickness stacking.
     """
     print("Smoothing jagged edges for final cleanup...")
     
     img_result = img.copy()
     
+    # Define outline colors that should be treated as strokes
+    # SKIP neon_green entirely - it's already thin and any processing fattens it
+    outline_colors_to_process = {
+        'outline_magenta',
+        'dark_purple',
+        'vibrant_red'
+    }
+    
     # Process each color region
     for color_name, color_bgr in PALETTE.items():
-        if color_name in ['sky_blue', 'black']:
+        # Skip background, black, and neon_green (to prevent thickness stacking)
+        if color_name in ['sky_blue', 'black', 'neon_green']:
             continue
             
         color_bgr = np.array(color_bgr, dtype=np.uint8)
@@ -723,13 +722,18 @@ def smooth_jagged_edges(img):
             continue
         
         # Apply morphological smoothing
-        # Opening removes small protrusions (bumps outward)
-        # Closing removes small intrusions (bumps inward)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         
-        # Opening followed by closing for balanced smoothing
-        smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
+        if color_name in outline_colors_to_process:
+            # OUTLINES: only light closing to smooth gaps, no opening
+            # Opening erodes thin strokes which destroys outline topology
+            smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        else:
+            # FILLS: opening + closing is safe for solid regions
+            # Opening removes small protrusions (bumps outward)
+            # Closing removes small intrusions (bumps inward)
+            smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
         
         # Apply Gaussian blur then threshold to smooth edges
         blurred = cv2.GaussianBlur(smoothed, (3, 3), 0)
@@ -825,8 +829,8 @@ def restore_image(image_path, output_dir):
     print(f"Downscaling to original size: {original_size}")
     img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
     
-    # Phase 6: Final palette enforcement
-    img_final = snap_to_palette(img_final)
+    # Phase 6: Final palette enforcement (protect outlines from being reassigned)
+    img_final = snap_to_palette(img_final, protect_outlines=True)
     
     # Phase 7: Final spec removal at output resolution
     img_final = remove_isolated_specs(img_final, min_area=20)
