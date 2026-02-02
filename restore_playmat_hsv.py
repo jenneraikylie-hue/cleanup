@@ -110,17 +110,18 @@ def preprocess_with_hsv(img):
     green_mask = (h >= 30) & (h <= 90) & (s > 20) & (v > 40)
     
     # Apply morphological closing to fill gaps in green outlines
-    # This creates consistent, continuous outlines without jaggedness
+    # UPDATED: Reduced kernel from 7x7 to 5x5 and iterations from 2 to 1 to preserve thin outlines
     green_mask_uint8 = green_mask.astype(np.uint8) * 255
-    green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    green_mask_closed = cv2.morphologyEx(green_mask_uint8, cv2.MORPH_CLOSE, green_close_kernel, iterations=2)
+    green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    green_mask_closed = cv2.morphologyEx(green_mask_uint8, cv2.MORPH_CLOSE, green_close_kernel, iterations=1)
     
     # Remove small disconnected "rogue" green pixels using connected component analysis
     # This keeps only large connected regions (the actual outlines) and removes isolated pixels
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(green_mask_closed, connectivity=8)
     
-    # Calculate minimum area threshold (keep components > 100 pixels)
-    min_component_area = 100
+    # Calculate minimum area threshold (keep components > 25 pixels)
+    # UPDATED: Reduced from 100 to 25 to preserve thinner green outline segments
+    min_component_area = 25
     
     # Create cleaned mask keeping only significant components
     green_mask_clean = np.zeros_like(green_mask_closed)
@@ -206,10 +207,10 @@ def preprocess_with_hsv(img):
     return img_processed
 
 
-def bilateral_smooth_edges(img, d=15, sigma_color=100, sigma_space=100):
+def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50):
     """
     Apply bilateral filter to smooth texture while preserving edges.
-    Increased parameters for stronger smoothing of pixelated outlines.
+    UPDATED: Reduced parameters (d=9, sigma=50) to preserve thin outlines like green borders.
     """
     print("Applying bilateral filter for edge-preserving smoothing...")
     smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
