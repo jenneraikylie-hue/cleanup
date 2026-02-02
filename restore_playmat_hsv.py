@@ -109,35 +109,50 @@ def preprocess_with_hsv(img):
     # UPDATED: Lower saturation threshold (20) and Value (40) to catch glared green
     green_mask = (h >= 30) & (h <= 90) & (s > 20) & (v > 40)
     
-    # ==== EDGE CONFIDENCE MASKING for yellow/green boundaries ====
-    # For pixels that could be green, check neighborhood context
-    # If surrounded mostly by yellow-hue pixels, bias toward yellow (interior continuity)
-    # Only classify as green if part of a continuous stroke (not isolated)
+    # ==== BLUE-FACING OUTLINE ONLY (Option A) ====
+    # Green should only exist where it borders blue (background), not where it borders yellow
+    # This makes green behave as a "halo/accent" rather than a structural border
+    # Detect green pixels that touch yellow and erode only those
+    # Keep green pixels that touch blue
+    
+    # Create masks for neighbor detection
+    green_mask_uint8 = green_mask.astype(np.uint8) * 255
     
     # Create a "yellow-ish" hue mask (potential yellow interior pixels)
     yellow_hue_mask = (h >= 20) & (h <= 33) & (s > 60) & (v > 80)
     yellow_hue_mask_uint8 = yellow_hue_mask.astype(np.uint8) * 255
     
-    # Dilate yellow region to find pixels that are "surrounded by yellow"
-    yellow_neighborhood_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    yellow_dilated = cv2.dilate(yellow_hue_mask_uint8, yellow_neighborhood_kernel, iterations=1)
+    # Dilate yellow to find green pixels that are adjacent to yellow
+    yellow_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    yellow_dilated = cv2.dilate(yellow_hue_mask_uint8, yellow_neighbor_kernel, iterations=1)
     
-    # Erode yellow region to find definite yellow interior
-    yellow_interior = cv2.erode(yellow_hue_mask_uint8, yellow_neighborhood_kernel, iterations=1)
+    # Green pixels that touch yellow (yellow-facing green)
+    yellow_facing_green = green_mask_uint8 & yellow_dilated
     
-    # Pixels in the overlap (could be green but surrounded by yellow) need special handling
-    # If a "green" pixel is inside a yellow interior region, reclassify as yellow
-    green_mask_uint8 = green_mask.astype(np.uint8) * 255
+    # Dilate blue to find green pixels that are adjacent to blue (background)
+    blue_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    blue_dilated = cv2.dilate(blue_mask.astype(np.uint8) * 255, blue_neighbor_kernel, iterations=1)
     
-    # Remove green pixels that are isolated within yellow interiors
-    # A green pixel is "isolated" if it's inside the yellow interior (eroded region)
-    isolated_green = green_mask_uint8 & yellow_interior
-    green_mask_uint8 = green_mask_uint8 & ~isolated_green
+    # Green pixels that touch blue (blue-facing green) - these we want to KEEP
+    blue_facing_green = green_mask_uint8 & blue_dilated
+    
+    # Erode the yellow-facing green to reduce thickness on the yellow side
+    # But preserve blue-facing green completely
+    erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    yellow_facing_eroded = cv2.erode(yellow_facing_green, erode_kernel, iterations=1)
+    
+    # Combine: keep all blue-facing green + eroded yellow-facing green
+    # This preserves green on the outside edge while receding from yellow interior
+    green_mask_balanced = blue_facing_green | yellow_facing_eroded
+    
+    # Also keep any green that doesn't touch either (isolated stroke segments)
+    neither_facing = green_mask_uint8 & ~yellow_dilated & ~blue_dilated
+    green_mask_balanced = green_mask_balanced | neither_facing
     
     # Apply morphological closing to fill gaps in green outlines
     # UPDATED: Reduced kernel from 7x7 to 5x5 and iterations from 2 to 1 to preserve thin outlines
-    green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    green_mask_closed = cv2.morphologyEx(green_mask_uint8, cv2.MORPH_CLOSE, green_close_kernel, iterations=1)
+    green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    green_mask_closed = cv2.morphologyEx(green_mask_balanced, cv2.MORPH_CLOSE, green_close_kernel, iterations=1)
     
     # Remove small disconnected "rogue" green pixels using connected component analysis
     # This keeps only large connected regions (the actual outlines) and removes isolated pixels
@@ -155,7 +170,7 @@ def preprocess_with_hsv(img):
     
     # Apply Gaussian blur then re-threshold to smooth the edges of the mask
     # This creates professional-looking smooth outlines
-    green_mask_smooth = cv2.GaussianBlur(green_mask_clean, (5, 5), 0)
+    green_mask_smooth = cv2.GaussianBlur(green_mask_clean, (3, 3), 0)
     _, green_mask_final_uint8 = cv2.threshold(green_mask_smooth, 127, 255, cv2.THRESH_BINARY)
     green_mask_final = green_mask_final_uint8 > 0
     
@@ -638,7 +653,12 @@ def vectorize_edges(img, straightness_threshold=0.001, min_contour_area=500):
             # Determine drawing mode: stroke for outline colors, fill for others
             if is_outline_color:
                 # Draw as STROKE, not fill - preserves outline nature
-                thickness = max(2, int(0.004 * perimeter))
+                # UPDATED: Cap thickness to max 2-3px for neon_green to prevent dominance
+                # Green is an accent/halo, not a structural border
+                if color_name == 'neon_green':
+                    thickness = 2  # Fixed thin stroke for green
+                else:
+                    thickness = min(3, max(2, int(0.004 * perimeter)))  # Capped for other outlines
                 epsilon = straightness_threshold * perimeter
                 approx = cv2.approxPolyDP(contour, epsilon, True)
                 cv2.drawContours(new_mask, [approx], -1, 255, thickness=thickness)
