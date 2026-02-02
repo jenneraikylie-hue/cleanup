@@ -99,96 +99,61 @@ def preprocess_with_hsv(img):
     blue_count = np.sum(blue_mask)
     print(f"  Blue background (all): {blue_count:,} pixels → sky_blue")
     
-    # ==== 3. NEON GREEN (outlines around silhouettes) - PROCESS BEFORE YELLOW ====
-    # Based on provided color samples:
-    # - Lime green outline: HSL 67-70° → OpenCV hue ~33-35
-    # - Colors like #96be45, #b5cd00, #a9cb1b have hue around 33-35 in OpenCV scale
-    # CRITICAL: Process green BEFORE yellow to preserve outline detail
-    # Green range: 33-85° to catch lime-green outlines (HSL 67+), lowered to 33 for better coverage
-    # Lowered saturation threshold to catch slightly desaturated green pixels
-    # UPDATED: Lower saturation threshold (20) and Value (40) to catch glared green
-    green_mask = (h >= 30) & (h <= 90) & (s > 20) & (v > 40)
+    # ==== 3. YELLOW ELEMENTS FIRST (silhouettes, blocks) ====
+    # Process yellow BEFORE green so we can derive green as an outline around yellow
+    # Yellow hue in HSV: 20-33 degrees
+    yellow_mask = (h >= 20) & (h <= 35) & (s > 70) & (v > 100)
     
-    # ==== BLUE-FACING OUTLINE ONLY (Option A) ====
-    # Green should only exist where it borders blue (background), not where it borders yellow
-    # This makes green behave as a "halo/accent" rather than a structural border
-    # Detect green pixels that touch yellow and erode only those
-    # Keep green pixels that touch blue
+    # Clean up yellow mask with morphological operations
+    yellow_mask_uint8 = yellow_mask.astype(np.uint8) * 255
+    yellow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    yellow_mask_closed = cv2.morphologyEx(yellow_mask_uint8, cv2.MORPH_CLOSE, yellow_kernel, iterations=2)
+    yellow_mask_opened = cv2.morphologyEx(yellow_mask_closed, cv2.MORPH_OPEN, yellow_kernel, iterations=1)
     
-    # Create masks for neighbor detection
-    green_mask_uint8 = green_mask.astype(np.uint8) * 255
+    # Fill holes in yellow regions
+    contours, _ = cv2.findContours(yellow_mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    yellow_filled = np.zeros_like(yellow_mask_opened)
+    cv2.drawContours(yellow_filled, contours, -1, 255, -1)
     
-    # Create a "yellow-ish" hue mask (potential yellow interior pixels)
-    yellow_hue_mask = (h >= 20) & (h <= 33) & (s > 60) & (v > 80)
-    yellow_hue_mask_uint8 = yellow_hue_mask.astype(np.uint8) * 255
+    yellow_mask_final = yellow_filled > 0
+    img_processed[yellow_mask_final] = bright_yellow
+    yellow_count = np.sum(yellow_mask_final)
+    print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
-    # Dilate yellow to find green pixels that are adjacent to yellow
-    yellow_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    yellow_dilated = cv2.dilate(yellow_hue_mask_uint8, yellow_neighbor_kernel, iterations=1)
+    # ==== 4. NEON GREEN (derived as outside boundary of yellow) ====
+    # Green outline should ONLY exist on the outside edge of yellow, facing blue
+    # This ensures green is an accent/halo, not a fill
     
-    # Green pixels that touch yellow (yellow-facing green)
-    yellow_facing_green = green_mask_uint8 & yellow_dilated
+    # Dilate yellow slightly to create an outer ring where green should live
+    green_ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    yellow_dilated_for_green = cv2.dilate(yellow_filled, green_ring_kernel, iterations=1)
     
-    # Dilate blue to find green pixels that are adjacent to blue (background)
+    # The green ring is: dilated_yellow - original_yellow (the outer edge only)
+    green_ring = yellow_dilated_for_green & ~yellow_filled
+    
+    # Only keep green ring pixels that are adjacent to blue (the background)
+    # This ensures green only appears on the outside, not between touching yellow regions
+    blue_mask_uint8 = blue_mask.astype(np.uint8) * 255
     blue_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    blue_dilated = cv2.dilate(blue_mask.astype(np.uint8) * 255, blue_neighbor_kernel, iterations=1)
+    blue_dilated = cv2.dilate(blue_mask_uint8, blue_neighbor_kernel, iterations=1)
     
-    # Green pixels that touch blue (blue-facing green) - these we want to KEEP
-    blue_facing_green = green_mask_uint8 & blue_dilated
+    # Green outline = ring pixels that touch blue
+    green_mask_final = (green_ring > 0) & (blue_dilated > 0)
     
-    # Erode the yellow-facing green to reduce thickness on the yellow side
-    # But preserve blue-facing green completely
-    erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    yellow_facing_eroded = cv2.erode(yellow_facing_green, erode_kernel, iterations=1)
+    # Thin the green outline to 1-2 pixels using erosion
+    green_mask_uint8 = green_mask_final.astype(np.uint8) * 255
+    thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    green_mask_thinned = cv2.erode(green_mask_uint8, thin_kernel, iterations=1)
     
-    # Combine: keep all blue-facing green + eroded yellow-facing green
-    # This preserves green on the outside edge while receding from yellow interior
-    green_mask_balanced = blue_facing_green | yellow_facing_eroded
+    # If erosion removed too much, use original
+    if np.sum(green_mask_thinned) < np.sum(green_mask_uint8) * 0.3:
+        green_mask_thinned = green_mask_uint8
     
-    # Also keep any green that doesn't touch either (isolated stroke segments)
-    neither_facing = green_mask_uint8 & ~yellow_dilated & ~blue_dilated
-    green_mask_balanced = green_mask_balanced | neither_facing
-    
-    # Apply morphological closing to fill gaps in green outlines
-    # UPDATED: Reduced kernel from 7x7 to 5x5 and iterations from 2 to 1 to preserve thin outlines
-    green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    green_mask_closed = cv2.morphologyEx(green_mask_balanced, cv2.MORPH_CLOSE, green_close_kernel, iterations=1)
-    
-    # Remove small disconnected "rogue" green pixels using connected component analysis
-    # This keeps only large connected regions (the actual outlines) and removes isolated pixels
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(green_mask_closed, connectivity=8)
-    
-    # Calculate minimum area threshold (keep components > 25 pixels)
-    # UPDATED: Reduced from 100 to 25 to preserve thinner green outline segments
-    min_component_area = 25
-    
-    # Create cleaned mask keeping only significant components
-    green_mask_clean = np.zeros_like(green_mask_closed)
-    for i in range(1, num_labels):  # Skip background (label 0)
-        if stats[i, cv2.CC_STAT_AREA] >= min_component_area:
-            green_mask_clean[labels == i] = 255
-    
-    # SKIP Gaussian blur for green to prevent thickness stacking
-    # The blur was fattening strokes; just use the cleaned mask directly
-    green_mask_final = green_mask_clean > 0
+    green_mask_final = green_mask_thinned > 0
     
     img_processed[green_mask_final] = neon_green
     green_count = np.sum(green_mask_final)
     print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
-    
-    # ==== 4. YELLOW ELEMENTS (silhouettes, blocks, ladder text, with glare variations) ====
-    # Based on provided color samples:
-    # - Block yellow (infill): HSL 59-60° → OpenCV hue ~29-30 (#FBFB00, #FAF900, #F8F800)
-    #   Very high saturation (100%), high value (49%)
-    # - Golden orange: HSL 58-59° → OpenCV hue ~29-30 (#FEF900, #FFFA00)
-    # - Yellow silhouette inside: HSL 62-63° → OpenCV hue ~31 (#DFE801, #DCE803)
-    # Yellow hue in HSV: 20-33 degrees to capture all yellow variations including block yellow
-    # CRITICAL: Process AFTER green to preserve green outlines around yellow silhouettes
-    # Exclude pixels already marked as green
-    yellow_mask = (h >= 20) & (h <= 33) & (s > 80) & (v > 100) & ~green_mask_final
-    img_processed[yellow_mask] = bright_yellow
-    yellow_count = np.sum(yellow_mask)
-    print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
     # ==== 5. PINK/MAGENTA ELEMENTS (hot pink, outline magenta, and dark purple) ====
     # Based on provided color samples:
