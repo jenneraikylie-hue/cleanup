@@ -686,10 +686,19 @@ def smooth_jagged_edges(img):
     """
     Apply final edge smoothing to remove remaining jaggedness.
     Uses a combination of morphological operations and contour smoothing.
+    UPDATED: Outline colors only get closing (no opening) to preserve stroke topology.
     """
     print("Smoothing jagged edges for final cleanup...")
     
     img_result = img.copy()
+    
+    # Define outline colors that should be treated as strokes
+    outline_colors = {
+        'neon_green',
+        'outline_magenta',
+        'dark_purple',
+        'vibrant_red'
+    }
     
     # Process each color region
     for color_name, color_bgr in PALETTE.items():
@@ -705,13 +714,18 @@ def smooth_jagged_edges(img):
             continue
         
         # Apply morphological smoothing
-        # Opening removes small protrusions (bumps outward)
-        # Closing removes small intrusions (bumps inward)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         
-        # Opening followed by closing for balanced smoothing
-        smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
+        if color_name in outline_colors:
+            # OUTLINES: only light closing to smooth gaps, no opening
+            # Opening erodes thin strokes which destroys outline topology
+            smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        else:
+            # FILLS: opening + closing is safe for solid regions
+            # Opening removes small protrusions (bumps outward)
+            # Closing removes small intrusions (bumps inward)
+            smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
         
         # Apply Gaussian blur then threshold to smooth edges
         blurred = cv2.GaussianBlur(smoothed, (3, 3), 0)
