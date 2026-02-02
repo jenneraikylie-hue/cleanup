@@ -356,9 +356,23 @@ def morphological_cleanup(img, kernel_size=3, text_mask=None):
     return cleaned
 
 
-def snap_to_palette(img):
-    """Snap every pixel to the nearest palette color using Euclidean distance."""
+def snap_to_palette(img, protect_outlines=False):
+    """
+    Snap every pixel to the nearest palette color using Euclidean distance.
+    UPDATED: Can protect outline color pixels from being reassigned.
+    """
     print("Snapping to palette colors...")
+    
+    # If protecting outlines, save original outline pixels
+    outline_mask = None
+    original_img = None
+    if protect_outlines:
+        original_img = img.copy()
+        outline_colors = ['neon_green', 'outline_magenta', 'dark_purple', 'vibrant_red']
+        outline_mask = np.zeros(img.shape[:2], dtype=bool)
+        for color_name in outline_colors:
+            color_bgr = np.array(PALETTE[color_name], dtype=np.uint8)
+            outline_mask |= np.all(img == color_bgr, axis=2)
     
     # Reshape image to (num_pixels, 3)
     pixels = img.reshape(-1, 3).astype(np.float32)
@@ -375,6 +389,10 @@ def snap_to_palette(img):
     
     # Reshape back to image
     quantized = quantized_pixels.reshape(img.shape)
+    
+    # Restore protected outline pixels
+    if protect_outlines and outline_mask is not None:
+        quantized[outline_mask] = original_img[outline_mask]
     
     # Count pixels per color
     unique, counts = np.unique(closest_indices, return_counts=True)
@@ -508,6 +526,7 @@ def uniform_outline_width(img):
     """
     Normalize outline widths for consistent, professional appearance.
     Uses morphological operations to create uniform outline thickness.
+    UPDATED: Prevent outline colors from expanding inward - only reinforce existing pixels.
     """
     print("Normalizing outline widths for consistency...")
     
@@ -534,8 +553,10 @@ def uniform_outline_width(img):
         close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         mask_closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
         
-        # Apply the smoothed mask
-        img_result[mask_closed > 0] = color_bgr
+        # For outline colors, only reinforce existing pixels - don't expand inward
+        # This prevents green from flooding over yellow
+        original_color_mask = np.all(img == color_bgr, axis=2)
+        img_result[(mask_closed > 0) & original_color_mask] = color_bgr
     
     return img_result
 
@@ -545,11 +566,21 @@ def vectorize_edges(img, straightness_threshold=0.001, min_contour_area=500):
     Create vector-like clean edges.
     UPDATED: Lower threshold (0.001) to preserve organic curves (hands, feet) 
     while still sharpening blocky edges.
+    UPDATED: Treat outline colors (neon_green, outline_magenta, etc.) as STROKES,
+    not filled regions, to preserve the outline-on-fill layering.
     """
     print("Vectorizing edges (High Fidelity Mode)...")
     
     img_result = img.copy()
     total_contours_processed = 0
+    
+    # Define outline colors that should be drawn as strokes, not fills
+    outline_color_names = {
+        'neon_green',
+        'outline_magenta',
+        'dark_purple',
+        'vibrant_red'
+    }
     
     # Process each palette color (except background and black)
     for color_name, color_bgr in PALETTE.items():
@@ -567,6 +598,7 @@ def vectorize_edges(img, straightness_threshold=0.001, min_contour_area=500):
             continue
         
         new_mask = np.zeros_like(mask)
+        is_outline_color = color_name in outline_color_names
         
         for i, contour in enumerate(contours):
             if cv2.contourArea(contour) < 50: 
@@ -579,19 +611,25 @@ def vectorize_edges(img, straightness_threshold=0.001, min_contour_area=500):
             epsilon_rough = 0.02 * perimeter
             approx_rough = cv2.approxPolyDP(contour, epsilon_rough, True)
             
-            # If it's a simple rectangle, enforce straight lines
-            if len(approx_rough) == 4 and cv2.isContourConvex(approx_rough):
+            # Determine drawing mode: stroke for outline colors, fill for others
+            if is_outline_color:
+                # Draw as STROKE, not fill - preserves outline nature
+                thickness = max(2, int(0.004 * perimeter))
+                epsilon = straightness_threshold * perimeter
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                cv2.drawContours(new_mask, [approx], -1, 255, thickness=thickness)
+            elif len(approx_rough) == 4 and cv2.isContourConvex(approx_rough):
+                # If it's a simple rectangle, enforce straight lines (filled)
                 approx = _snap_to_right_angles(approx_rough)
                 cv2.drawContours(new_mask, [approx], -1, 255, -1)
             else:
-                # If it's a complex shape (Figures, Footprints), PRESERVE CURVES
-                # Use a tiny epsilon just to smooth pixel jitter, not to simplify shape
+                # If it's a complex shape (Figures, Footprints), PRESERVE CURVES (filled)
                 epsilon = straightness_threshold * perimeter 
                 approx = cv2.approxPolyDP(contour, epsilon, True)
                 cv2.drawContours(new_mask, [approx], -1, 255, -1)
         
-        # Handle holes (hierarchy level 1)
-        if hierarchy is not None:
+        # Handle holes (hierarchy level 1) - only for filled regions
+        if hierarchy is not None and not is_outline_color:
             for i, contour in enumerate(contours):
                 if hierarchy[0][i][3] != -1: # It's a hole
                     if cv2.contourArea(contour) >= 50:
@@ -769,8 +807,8 @@ def restore_image(image_path, output_dir):
     print(f"Downscaling to original size: {original_size}")
     img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
     
-    # Phase 6: Final palette enforcement
-    img_final = snap_to_palette(img_final)
+    # Phase 6: Final palette enforcement (protect outlines from being reassigned)
+    img_final = snap_to_palette(img_final, protect_outlines=True)
     
     # Phase 7: Final spec removal at output resolution
     img_final = remove_isolated_specs(img_final, min_area=20)
