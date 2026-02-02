@@ -106,7 +106,8 @@ def preprocess_with_hsv(img):
     # CRITICAL: Process green BEFORE yellow to preserve outline detail
     # Green range: 33-85° to catch lime-green outlines (HSL 67+), lowered to 33 for better coverage
     # Lowered saturation threshold to catch slightly desaturated green pixels
-    green_mask = (h >= 33) & (h <= 85) & (s > 25) & (v > 45)
+    # UPDATED: Lower saturation threshold (20) and Value (40) to catch glared green
+    green_mask = (h >= 30) & (h <= 90) & (s > 20) & (v > 40)
     
     # Apply morphological closing to fill gaps in green outlines
     # This creates consistent, continuous outlines without jaggedness
@@ -323,33 +324,32 @@ def detect_text_regions(img):
     return protected_mask
 
 
-def morphological_cleanup(img, kernel_size=5, text_mask=None):
+def morphological_cleanup(img, kernel_size=3, text_mask=None):
     """
-    Apply morphological operations to clean up noise and smooth outlines.
-    Removes small specs and smooths pixelated edges.
-    If text_mask is provided, applies gentler processing to text regions.
+    Apply gentle morphological operations to clean up noise.
+    UPDATED: Reduced kernel size and iterations to preserve thin outlines.
     """
-    print(f"Applying morphological cleanup (kernel={kernel_size})...")
+    print(f"Applying gentle morphological cleanup (kernel={kernel_size})...")
+    
+    # Use a smaller kernel to avoid eating thin lines
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     
-    # Opening first to remove small noise/specs (like white dots)
-    opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel, iterations=2)
+    # 1. Opening: Removes small white noise. 
+    # Reduced to 1 iteration to prevent erasing thin outlines.
+    opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel, iterations=1)
     
-    # Closing to fill small holes and smooth outlines
-    cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # 2. Closing: Fills small dark holes.
+    cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=1)
     
     # If text mask provided, blend original with cleaned to preserve text
     if text_mask is not None:
         print("  Applying text protection - preserving original in text regions...")
-        # Use smaller kernel for text regions (gentler cleanup)
         text_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         text_cleaned = cv2.morphologyEx(img, cv2.MORPH_CLOSE, text_kernel, iterations=1)
         
-        # Create 3-channel mask for blending
         text_mask_3ch = cv2.cvtColor(text_mask, cv2.COLOR_GRAY2BGR)
         text_mask_float = text_mask_3ch.astype(np.float32) / 255.0
         
-        # Blend: use gentler cleanup for text regions, aggressive cleanup elsewhere
         cleaned = (text_mask_float * text_cleaned + (1 - text_mask_float) * cleaned).astype(np.uint8)
     
     return cleaned
@@ -539,16 +539,13 @@ def uniform_outline_width(img):
     return img_result
 
 
-def vectorize_edges(img, straightness_threshold=0.02, min_contour_area=500):
+def vectorize_edges(img, straightness_threshold=0.001, min_contour_area=500):
     """
-    Create vector-like clean edges by:
-    1. Detecting straight lines and making them perfectly straight
-    2. Smoothing curves while preserving their shape
-    3. Creating clean, professional edges for all color regions
-    
-    This is shape-aware: rectangles get straight edges, circles stay curved.
+    Create vector-like clean edges.
+    UPDATED: Lower threshold (0.001) to preserve organic curves (hands, feet) 
+    while still sharpening blocky edges.
     """
-    print("Vectorizing edges for clean, professional appearance...")
+    print("Vectorizing edges (High Fidelity Mode)...")
     
     img_result = img.copy()
     total_contours_processed = 0
@@ -559,106 +556,52 @@ def vectorize_edges(img, straightness_threshold=0.02, min_contour_area=500):
             continue
             
         color_bgr = np.array(color_bgr, dtype=np.uint8)
-        
-        # Find pixels of this color
         mask = np.all(img == color_bgr, axis=2).astype(np.uint8) * 255
         
         if np.sum(mask) < min_contour_area:
             continue
         
-        # Find contours for this color region
         contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-        
         if not contours:
             continue
         
-        # Create new mask for vectorized version
         new_mask = np.zeros_like(mask)
         
         for i, contour in enumerate(contours):
-            if cv2.contourArea(contour) < 50:  # Skip tiny contours
+            if cv2.contourArea(contour) < 50: 
                 continue
             
             total_contours_processed += 1
-            
-            # Get contour perimeter
             perimeter = cv2.arcLength(contour, True)
             
-            if perimeter < 10:  # Skip tiny perimeters
-                cv2.drawContours(new_mask, [contour], -1, 255, -1)
-                continue
-            
-            # Approximate the contour with different epsilon values
-            # to determine if it's more line-like or curve-like
-            
-            # Try a rough approximation first
-            epsilon_rough = straightness_threshold * perimeter
+            # Check for rectangularity (Ladder rungs)
+            epsilon_rough = 0.02 * perimeter
             approx_rough = cv2.approxPolyDP(contour, epsilon_rough, True)
             
-            # Check if this is a roughly rectangular shape (4-6 vertices)
-            is_rectangular = 4 <= len(approx_rough) <= 6
-            
-            # Check for circularity
-            area = cv2.contourArea(contour)
-            if perimeter > 0:
-                circularity = 4 * np.pi * area / (perimeter * perimeter)
-            else:
-                circularity = 0
-            
-            is_circular = circularity > 0.7  # Circles have circularity close to 1
-            
-            if is_rectangular and not is_circular:
-                # This is a rectangular shape - use polygon approximation
-                # to create straight edges
-                epsilon = 0.015 * perimeter  # Tighter approximation for straighter edges
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-                
-                # For rectangles, ensure we have clean 90-degree corners
-                # by snapping angles to nearest 90 degrees if close
-                if len(approx) == 4:
-                    approx = _snap_to_right_angles(approx)
-                
+            # If it's a simple rectangle, enforce straight lines
+            if len(approx_rough) == 4 and cv2.isContourConvex(approx_rough):
+                approx = _snap_to_right_angles(approx_rough)
                 cv2.drawContours(new_mask, [approx], -1, 255, -1)
-                
-            elif is_circular:
-                # This is a circular shape - preserve the curve
-                # Use a smoother approximation
-                epsilon = 0.005 * perimeter  # Very fine approximation to preserve curves
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-                
-                # Additionally, fit an ellipse if we have enough points
-                if len(contour) >= 5:
-                    try:
-                        ellipse = cv2.fitEllipse(contour)
-                        # Draw the fitted ellipse for smoother circles
-                        cv2.ellipse(new_mask, ellipse, 255, -1)
-                    except cv2.error:
-                        # Fallback to approximated contour
-                        cv2.drawContours(new_mask, [approx], -1, 255, -1)
-                else:
-                    cv2.drawContours(new_mask, [approx], -1, 255, -1)
             else:
-                # Mixed shape - use moderate smoothing
-                epsilon = 0.01 * perimeter
+                # If it's a complex shape (Figures, Footprints), PRESERVE CURVES
+                # Use a tiny epsilon just to smooth pixel jitter, not to simplify shape
+                epsilon = straightness_threshold * perimeter 
                 approx = cv2.approxPolyDP(contour, epsilon, True)
                 cv2.drawContours(new_mask, [approx], -1, 255, -1)
         
         # Handle holes (hierarchy level 1)
         if hierarchy is not None:
             for i, contour in enumerate(contours):
-                # Check if this is a hole (has a parent)
-                if hierarchy[0][i][3] != -1:
+                if hierarchy[0][i][3] != -1: # It's a hole
                     if cv2.contourArea(contour) >= 50:
                         perimeter = cv2.arcLength(contour, True)
-                        if perimeter > 0:
-                            epsilon = 0.01 * perimeter
-                            approx = cv2.approxPolyDP(contour, epsilon, True)
-                            cv2.drawContours(new_mask, [approx], -1, 0, -1)  # Cut out hole
+                        epsilon = 0.001 * perimeter # Keep holes precise
+                        approx = cv2.approxPolyDP(contour, epsilon, True)
+                        cv2.drawContours(new_mask, [approx], -1, 0, -1)
         
-        # Apply the vectorized mask
         img_result[new_mask > 0] = color_bgr
     
-    print(f"  Processed {total_contours_processed} contours")
+    print(f"  Processed {total_contours_processed} contours (High Fidelity)")
     return img_result
 
 
