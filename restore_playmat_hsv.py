@@ -109,9 +109,33 @@ def preprocess_with_hsv(img):
     # UPDATED: Lower saturation threshold (20) and Value (40) to catch glared green
     green_mask = (h >= 30) & (h <= 90) & (s > 20) & (v > 40)
     
+    # ==== EDGE CONFIDENCE MASKING for yellow/green boundaries ====
+    # For pixels that could be green, check neighborhood context
+    # If surrounded mostly by yellow-hue pixels, bias toward yellow (interior continuity)
+    # Only classify as green if part of a continuous stroke (not isolated)
+    
+    # Create a "yellow-ish" hue mask (potential yellow interior pixels)
+    yellow_hue_mask = (h >= 20) & (h <= 33) & (s > 60) & (v > 80)
+    yellow_hue_mask_uint8 = yellow_hue_mask.astype(np.uint8) * 255
+    
+    # Dilate yellow region to find pixels that are "surrounded by yellow"
+    yellow_neighborhood_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    yellow_dilated = cv2.dilate(yellow_hue_mask_uint8, yellow_neighborhood_kernel, iterations=1)
+    
+    # Erode yellow region to find definite yellow interior
+    yellow_interior = cv2.erode(yellow_hue_mask_uint8, yellow_neighborhood_kernel, iterations=1)
+    
+    # Pixels in the overlap (could be green but surrounded by yellow) need special handling
+    # If a "green" pixel is inside a yellow interior region, reclassify as yellow
+    green_mask_uint8 = green_mask.astype(np.uint8) * 255
+    
+    # Remove green pixels that are isolated within yellow interiors
+    # A green pixel is "isolated" if it's inside the yellow interior (eroded region)
+    isolated_green = green_mask_uint8 & yellow_interior
+    green_mask_uint8 = green_mask_uint8 & ~isolated_green
+    
     # Apply morphological closing to fill gaps in green outlines
     # UPDATED: Reduced kernel from 7x7 to 5x5 and iterations from 2 to 1 to preserve thin outlines
-    green_mask_uint8 = green_mask.astype(np.uint8) * 255
     green_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     green_mask_closed = cv2.morphologyEx(green_mask_uint8, cv2.MORPH_CLOSE, green_close_kernel, iterations=1)
     
