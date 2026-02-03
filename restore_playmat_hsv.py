@@ -920,8 +920,14 @@ def solidify_color_regions(img, kernel_size=5):
     return img_solid
 
 
-def restore_image(image_path, output_dir):
-    """Main restoration pipeline."""
+def restore_image(image_path, output_dir, skip_despec=False):
+    """Main restoration pipeline.
+    
+    Args:
+        image_path: Path to the image file to process
+        output_dir: Directory to save the output
+        skip_despec: If True, skip isolated spec removal for faster processing
+    """
     print(f"\n{'='*60}")
     print(f"Processing: {Path(image_path).name}")
     print(f"{'='*60}")
@@ -945,7 +951,12 @@ def restore_image(image_path, output_dir):
     img_quantized = snap_to_palette(img_cleaned)
     
     # Phase 4d: Remove isolated specs (white dots, color noise)
-    img_despecked = remove_isolated_specs(img_quantized, min_area=50)
+    # This step is slow - can be skipped with --skip-despec flag
+    if skip_despec:
+        print("Skipping isolated spec removal (Phase 4d) - use without --skip-despec for cleaner output")
+        img_despecked = img_quantized
+    else:
+        img_despecked = remove_isolated_specs(img_quantized, min_area=50)
     
     # Phase 4e: Normalize outline widths for consistency
     img_uniform = uniform_outline_width(img_despecked)
@@ -974,7 +985,11 @@ def restore_image(image_path, output_dir):
     img_final = snap_to_palette(img_final, protect_outlines=True)
     
     # Phase 7: Final spec removal at output resolution
-    img_final = remove_isolated_specs(img_final, min_area=20)
+    # This step is slow - can be skipped with --skip-despec flag
+    if skip_despec:
+        print("Skipping final spec removal (Phase 7)")
+    else:
+        img_final = remove_isolated_specs(img_final, min_area=20)
     
     # Phase 8: Final edge smoothing at output resolution
     img_final = smooth_jagged_edges(img_final)
@@ -1000,13 +1015,28 @@ def restore_image(image_path, output_dir):
 
 def main():
     """Main entry point."""
-    if len(sys.argv) < 2:
-        print("Usage: python restore_playmat_hsv.py <image_or_directory>")
-        print("Example: python restore_playmat_hsv.py scan.jpg")
-        print("Example: python restore_playmat_hsv.py scans/")
-        sys.exit(1)
+    import argparse
     
-    input_path = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description='Restore scanned playmat images with color cleanup and outline rendering.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python restore_playmat_hsv.py scan.jpg
+  python restore_playmat_hsv.py scans/
+  python restore_playmat_hsv.py scan.jpg --skip-despec    # Skip slow spec removal for faster processing
+        '''
+    )
+    parser.add_argument('input_path', help='Image file or directory to process')
+    parser.add_argument('--skip-despec', action='store_true', 
+                        help='Skip isolated spec removal (much faster, may leave small color artifacts)')
+    
+    args = parser.parse_args()
+    input_path = args.input_path
+    skip_despec = args.skip_despec
+    
+    if skip_despec:
+        print("NOTE: Skipping isolated spec removal for faster processing")
     
     # Create output directory
     output_dir = "output"
@@ -1014,7 +1044,7 @@ def main():
     
     # Process single image or directory
     if os.path.isfile(input_path):
-        restore_image(input_path, output_dir)
+        restore_image(input_path, output_dir, skip_despec=skip_despec)
     elif os.path.isdir(input_path):
         image_files = []
         for ext in ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']:
@@ -1024,7 +1054,7 @@ def main():
         
         for img_path in image_files:
             try:
-                restore_image(str(img_path), output_dir)
+                restore_image(str(img_path), output_dir, skip_despec=skip_despec)
             except Exception as e:
                 print(f"Error processing {img_path}: {e}")
                 continue
