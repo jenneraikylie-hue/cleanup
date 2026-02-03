@@ -19,7 +19,7 @@ PALETTE = {
     'hot_pink':      (205, 0, 253),    # Primary Logo/Footprints
     'bright_yellow': (1, 252, 253),    # Silhouettes/Ladder Rungs
     'pure_white':    (255, 255, 255),  # Stars/Logo Interior (PROTECTED)
-    'neon_green':    (0, 213, 197),    # Silhouette Outlines
+    'neon_green':    (50, 180, 120),   # Silhouette Outlines - darker teal for better visibility
     'dark_purple':   (140, 0, 180),    # Outer Logo Border (3rd Layer)
     'vibrant_red':   (1, 13, 245),     # Ladder Accents/Underlines
     'deep_teal':     (10, 176, 149),   # Small Text/Shadows
@@ -120,40 +120,13 @@ def preprocess_with_hsv(img):
     yellow_count = np.sum(yellow_mask_final)
     print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
-    # ==== 4. NEON GREEN (derived as outside boundary of yellow) ====
-    # Green outline should ONLY exist on the outside edge of yellow, facing blue
-    # This ensures green is an accent/halo, not a fill
-    
-    # Dilate yellow slightly to create an outer ring where green should live
-    green_ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    yellow_dilated_for_green = cv2.dilate(yellow_filled, green_ring_kernel, iterations=1)
-    
-    # The green ring is: dilated_yellow - original_yellow (the outer edge only)
-    green_ring = yellow_dilated_for_green & ~yellow_filled
-    
-    # Only keep green ring pixels that are adjacent to blue (the background)
-    # This ensures green only appears on the outside, not between touching yellow regions
-    blue_mask_uint8 = blue_mask.astype(np.uint8) * 255
-    blue_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    blue_dilated = cv2.dilate(blue_mask_uint8, blue_neighbor_kernel, iterations=1)
-    
-    # Green outline = ring pixels that touch blue
-    green_mask_final = (green_ring > 0) & (blue_dilated > 0)
-    
-    # Thin the green outline to 1-2 pixels using erosion
-    green_mask_uint8 = green_mask_final.astype(np.uint8) * 255
-    thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    green_mask_thinned = cv2.erode(green_mask_uint8, thin_kernel, iterations=1)
-    
-    # If erosion removed too much, use original
-    if np.sum(green_mask_thinned) < np.sum(green_mask_uint8) * 0.3:
-        green_mask_thinned = green_mask_uint8
-    
-    green_mask_final = green_mask_thinned > 0
-    
-    img_processed[green_mask_final] = neon_green
-    green_count = np.sum(green_mask_final)
-    print(f"  Neon green outlines: {green_count:,} pixels → neon_green")
+    # ==== 4. NEON GREEN ====
+    # NOTE: Green outline rendering is now DEFERRED to the end of the pipeline.
+    # The old approach (dilate(yellow) - yellow) created a sub-pixel ring that was
+    # destroyed by subsequent processing steps. Green is now rendered as a stroke
+    # from edge geometry AFTER all other processing. See render_green_outline_from_edges().
+    # We still store the yellow_filled mask for use later.
+    print(f"  Neon green outlines: DEFERRED (will be rendered from yellow edges at end of pipeline)")
     
     # ==== 5. PINK/MAGENTA ELEMENTS (hot pink, outline magenta, and dark purple) ====
     # Based on provided color samples:
@@ -207,6 +180,164 @@ def preprocess_with_hsv(img):
     print(f"  Black/deadspace: {black_count:,} pixels → black")
     
     return img_processed
+
+
+def render_green_outline_from_edges(img, stroke_width=4):
+    """
+    Render green outline around yellow regions using contour-based stroke rendering.
+    
+    This approach is fundamentally different from the old dilate-minus method:
+    - Finds yellow region contours (boundaries)
+    - Draws contours as strokes with explicit thickness OUTSIDE yellow
+    - Paints green as a stroke that never overlaps yellow
+    - Should be called AFTER all other processing to avoid collapse
+    
+    The green outline survives because:
+    1. It's derived from geometry (contours), not filled regions
+    2. It has explicit, controllable width via cv2.drawContours thickness
+    3. It's painted last, bypassing snapping/smoothing/morphology/anti-aliasing
+    4. It never goes through operations that collapse sub-pixel features
+    
+    Args:
+        img: The processed image (after all other processing)
+        stroke_width: Width of the green outline in pixels (default 4)
+    
+    Returns:
+        Image with green outlines rendered around yellow regions
+    """
+    print(f"Rendering green outlines from yellow edges (stroke_width={stroke_width})...")
+    
+    img_result = img.copy()
+    
+    # Get palette colors
+    bright_yellow = np.array(PALETTE['bright_yellow'], dtype=np.uint8)
+    neon_green = np.array(PALETTE['neon_green'], dtype=np.uint8)
+    sky_blue = np.array(PALETTE['sky_blue'], dtype=np.uint8)
+    
+    # Find yellow regions in the processed image
+    yellow_mask = np.all(img == bright_yellow, axis=2).astype(np.uint8) * 255
+    
+    if np.sum(yellow_mask) == 0:
+        print("  No yellow regions found - skipping green outline rendering")
+        return img_result
+    
+    yellow_pixel_count = np.sum(yellow_mask > 0)
+    print(f"  Found {yellow_pixel_count:,} yellow pixels")
+    
+    # Find the outer contours of yellow regions
+    contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        print("  No yellow contours found - skipping green outline rendering")
+        return img_result
+    
+    print(f"  Found {len(contours)} yellow region contours")
+    
+    # Create green stroke by drawing contours with specified thickness
+    # We draw the contours OUTSIDE the yellow by:
+    # 1. Drawing thick contours on a separate mask
+    # 2. Subtracting the original yellow to ensure no overlap
+    green_stroke_mask = np.zeros(img.shape[:2], dtype=np.uint8)
+    
+    # Draw contours with the stroke width as thickness
+    # The contours are the boundary of yellow, so drawing with thickness
+    # will extend both inward and outward. We'll mask out the inward part.
+    cv2.drawContours(green_stroke_mask, contours, -1, 255, thickness=stroke_width)
+    
+    # CRITICAL: Mask out yellow interior so green only appears OUTSIDE yellow
+    # This ensures green is an outline, not overlapping the yellow fill
+    green_stroke_mask = (green_stroke_mask > 0) & (yellow_mask == 0)
+    
+    # Find blue background regions
+    blue_mask = np.all(img == sky_blue, axis=2).astype(np.uint8) * 255
+    
+    # Dilate blue slightly to ensure green can appear at the yellow-blue boundary
+    # Use a moderate kernel to be permissive without being excessive
+    blue_dilated = cv2.dilate(blue_mask, 
+                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (stroke_width * 2, stroke_width * 2)), 
+                               iterations=1)
+    
+    # Green should appear where it's in the stroke region AND near blue
+    # This prevents green from filling interior gaps but allows it on exterior edges
+    green_stroke_mask = green_stroke_mask & (blue_dilated > 0)
+    
+    # Paint green stroke onto the result image
+    # This is the LAST paint operation, so green is never destroyed by subsequent processing
+    img_result[green_stroke_mask.astype(bool)] = neon_green
+    
+    green_count = np.sum(green_stroke_mask)
+    print(f"  Rendered {green_count:,} green outline pixels")
+    
+    return img_result
+
+
+def fill_unowned_pixels(img, original_img=None):
+    """
+    Fill any unowned pixels (pixels not assigned to any palette color) to eliminate white halos.
+    
+    White halos appear when:
+    - Masks don't cover all pixels (gaps at edges)
+    - Anti-aliasing or smoothing introduces intermediate colors
+    - Dropped alpha channels flatten against white
+    
+    This function ensures every pixel belongs to a color class by snapping all pixels
+    to their nearest palette color. This is more efficient than pixel-by-pixel iteration.
+    
+    Args:
+        img: The processed image
+        original_img: Optional original image for fallback colors (unused, kept for API compatibility)
+    
+    Returns:
+        Image with all pixels assigned to palette colors
+    """
+    print("Filling unowned pixels to eliminate white halos...")
+    
+    # Find pixels that match any palette color
+    owned_mask = np.zeros(img.shape[:2], dtype=bool)
+    for color_name, color_bgr in PALETTE.items():
+        color_bgr = np.array(color_bgr, dtype=np.uint8)
+        owned_mask |= np.all(img == color_bgr, axis=2)
+    
+    # Find unowned pixels
+    unowned_mask = ~owned_mask
+    unowned_count = np.sum(unowned_mask)
+    
+    if unowned_count == 0:
+        print("  No unowned pixels found")
+        return img
+    
+    print(f"  Found {unowned_count:,} unowned pixels - snapping to nearest palette colors")
+    
+    # Instead of slow iteration, simply snap all unowned pixels to their nearest palette color
+    # This efficiently handles all edge cases including white halos
+    img_result = img.copy()
+    
+    # Get unowned pixel colors and their positions
+    unowned_pixels = img[unowned_mask].astype(np.float32)
+    total_unowned = len(unowned_pixels)
+    
+    # Process in chunks to avoid memory issues
+    chunk_size = 1000000  # Process 1M pixels at a time
+    replacement_colors = np.zeros((total_unowned, 3), dtype=np.uint8)
+    
+    for start in range(0, total_unowned, chunk_size):
+        end = min(start + chunk_size, total_unowned)
+        chunk = unowned_pixels[start:end]
+        
+        # Compute distance to each palette color (vectorized)
+        distances = np.linalg.norm(chunk[:, np.newaxis, :] - PALETTE_ARRAY[np.newaxis, :, :], axis=2)
+        
+        # Find closest palette color for each unowned pixel in chunk
+        closest_indices = np.argmin(distances, axis=1)
+        
+        # Map to palette colors
+        replacement_colors[start:end] = PALETTE_ARRAY[closest_indices].astype(np.uint8)
+    
+    # Apply replacements
+    img_result[unowned_mask] = replacement_colors
+    
+    print(f"  Filled {unowned_count:,} unowned pixels")
+    return img_result
 
 
 def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50):
@@ -362,6 +493,7 @@ def snap_to_palette(img, protect_outlines=False):
     """
     Snap every pixel to the nearest palette color using Euclidean distance.
     UPDATED: Can protect outline color pixels from being reassigned.
+    UPDATED: Process in chunks to avoid memory issues with large images.
     """
     print("Snapping to palette colors...")
     
@@ -378,13 +510,22 @@ def snap_to_palette(img, protect_outlines=False):
     
     # Reshape image to (num_pixels, 3)
     pixels = img.reshape(-1, 3).astype(np.float32)
+    total_pixels = len(pixels)
     
-    # Compute distance to each palette color (vectorized)
-    # Shape: (num_pixels, num_colors)
-    distances = np.linalg.norm(pixels[:, np.newaxis, :] - PALETTE_ARRAY[np.newaxis, :, :], axis=2)
+    # Process in chunks to avoid memory issues
+    chunk_size = 1000000  # Process 1M pixels at a time
+    closest_indices = np.zeros(total_pixels, dtype=np.int32)
     
-    # Find closest palette color for each pixel
-    closest_indices = np.argmin(distances, axis=1)
+    for start in range(0, total_pixels, chunk_size):
+        end = min(start + chunk_size, total_pixels)
+        chunk = pixels[start:end]
+        
+        # Compute distance to each palette color (vectorized)
+        # Shape: (chunk_size, num_colors)
+        distances = np.linalg.norm(chunk[:, np.newaxis, :] - PALETTE_ARRAY[np.newaxis, :, :], axis=2)
+        
+        # Find closest palette color for each pixel in chunk
+        closest_indices[start:end] = np.argmin(distances, axis=1)
     
     # Map to palette colors
     quantized_pixels = PALETTE_ARRAY[closest_indices].astype(np.uint8)
@@ -400,7 +541,7 @@ def snap_to_palette(img, protect_outlines=False):
     unique, counts = np.unique(closest_indices, return_counts=True)
     print("  Color distribution:")
     for idx, count in zip(unique, counts):
-        pct = 100.0 * count / len(pixels)
+        pct = 100.0 * count / total_pixels
         print(f"    {PALETTE_NAMES[idx]}: {count:,} pixels ({pct:.2f}%)")
     
     return quantized
@@ -779,8 +920,14 @@ def solidify_color_regions(img, kernel_size=5):
     return img_solid
 
 
-def restore_image(image_path, output_dir):
-    """Main restoration pipeline."""
+def restore_image(image_path, output_dir, skip_despec=False):
+    """Main restoration pipeline.
+    
+    Args:
+        image_path: Path to the image file to process
+        output_dir: Directory to save the output
+        skip_despec: If True, skip isolated spec removal for faster processing
+    """
     print(f"\n{'='*60}")
     print(f"Processing: {Path(image_path).name}")
     print(f"{'='*60}")
@@ -804,7 +951,12 @@ def restore_image(image_path, output_dir):
     img_quantized = snap_to_palette(img_cleaned)
     
     # Phase 4d: Remove isolated specs (white dots, color noise)
-    img_despecked = remove_isolated_specs(img_quantized, min_area=50)
+    # This step is slow - can be skipped with --skip-despec flag
+    if skip_despec:
+        print("Skipping isolated spec removal (Phase 4d) - use without --skip-despec for cleaner output")
+        img_despecked = img_quantized
+    else:
+        img_despecked = remove_isolated_specs(img_quantized, min_area=50)
     
     # Phase 4e: Normalize outline widths for consistency
     img_uniform = uniform_outline_width(img_despecked)
@@ -833,10 +985,24 @@ def restore_image(image_path, output_dir):
     img_final = snap_to_palette(img_final, protect_outlines=True)
     
     # Phase 7: Final spec removal at output resolution
-    img_final = remove_isolated_specs(img_final, min_area=20)
+    # This step is slow - can be skipped with --skip-despec flag
+    if skip_despec:
+        print("Skipping final spec removal (Phase 7)")
+    else:
+        img_final = remove_isolated_specs(img_final, min_area=20)
     
     # Phase 8: Final edge smoothing at output resolution
     img_final = smooth_jagged_edges(img_final)
+    
+    # Phase 9: Fill unowned pixels to eliminate white halos
+    # This ensures every pixel belongs to a palette color class
+    img_final = fill_unowned_pixels(img_final)
+    
+    # Phase 10: Render green outlines from yellow edges as the FINAL step
+    # This is critical - green is rendered AFTER all processing to prevent collapse
+    # The green stroke is derived from geometry (edge detection), not morphology
+    # and has explicit width that survives all previous operations
+    img_final = render_green_outline_from_edges(img_final, stroke_width=8)
     
     # Save output
     input_filename = Path(image_path).stem
@@ -849,13 +1015,28 @@ def restore_image(image_path, output_dir):
 
 def main():
     """Main entry point."""
-    if len(sys.argv) < 2:
-        print("Usage: python restore_playmat_hsv.py <image_or_directory>")
-        print("Example: python restore_playmat_hsv.py scan.jpg")
-        print("Example: python restore_playmat_hsv.py scans/")
-        sys.exit(1)
+    import argparse
     
-    input_path = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description='Restore scanned playmat images with color cleanup and outline rendering.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python restore_playmat_hsv.py scan.jpg
+  python restore_playmat_hsv.py scans/
+  python restore_playmat_hsv.py scan.jpg --skip-despec    # Skip slow spec removal for faster processing
+        '''
+    )
+    parser.add_argument('input_path', help='Image file or directory to process')
+    parser.add_argument('--skip-despec', action='store_true', 
+                        help='Skip isolated spec removal (much faster, may leave small color artifacts)')
+    
+    args = parser.parse_args()
+    input_path = args.input_path
+    skip_despec = args.skip_despec
+    
+    if skip_despec:
+        print("NOTE: Skipping isolated spec removal for faster processing")
     
     # Create output directory
     output_dir = "output"
@@ -863,7 +1044,7 @@ def main():
     
     # Process single image or directory
     if os.path.isfile(input_path):
-        restore_image(input_path, output_dir)
+        restore_image(input_path, output_dir, skip_despec=skip_despec)
     elif os.path.isdir(input_path):
         image_files = []
         for ext in ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']:
@@ -873,7 +1054,7 @@ def main():
         
         for img_path in image_files:
             try:
-                restore_image(str(img_path), output_dir)
+                restore_image(str(img_path), output_dir, skip_despec=skip_despec)
             except Exception as e:
                 print(f"Error processing {img_path}: {e}")
                 continue
