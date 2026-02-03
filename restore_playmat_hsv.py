@@ -19,7 +19,7 @@ PALETTE = {
     'hot_pink':      (205, 0, 253),    # Primary Logo/Footprints
     'bright_yellow': (1, 252, 253),    # Silhouettes/Ladder Rungs
     'pure_white':    (255, 255, 255),  # Stars/Logo Interior (PROTECTED)
-    'neon_green':    (0, 213, 197),    # Silhouette Outlines
+    'neon_green':    (50, 180, 120),   # Silhouette Outlines - darker teal for better visibility
     'dark_purple':   (140, 0, 180),    # Outer Logo Border (3rd Layer)
     'vibrant_red':   (1, 13, 245),     # Ladder Accents/Underlines
     'deep_teal':     (10, 176, 149),   # Small Text/Shadows
@@ -987,7 +987,7 @@ def restore_image(image_path, output_dir):
     # This is critical - green is rendered AFTER all processing to prevent collapse
     # The green stroke is derived from geometry (edge detection), not morphology
     # and has explicit width that survives all previous operations
-    img_final = render_green_outline_from_edges(img_final, stroke_width=6)
+    img_final = render_green_outline_from_edges(img_final, stroke_width=8)
     
     # Save output
     input_filename = Path(image_path).stem
