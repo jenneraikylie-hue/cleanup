@@ -184,17 +184,17 @@ def preprocess_with_hsv(img):
 
 def render_green_outline_from_edges(img, stroke_width=4):
     """
-    Render green outline around yellow regions using edge-based stroke rendering.
+    Render green outline around yellow regions using contour-based stroke rendering.
     
     This approach is fundamentally different from the old dilate-minus method:
-    - Uses Canny edge detection to find stable 1-pixel edges on yellow
-    - Dilates edges OUTWARD only (away from yellow interior) 
+    - Finds yellow region contours (boundaries)
+    - Draws contours as strokes with explicit thickness OUTSIDE yellow
     - Paints green as a stroke that never overlaps yellow
     - Should be called AFTER all other processing to avoid collapse
     
     The green outline survives because:
-    1. It's derived from geometry (edges), not filled regions
-    2. It has explicit, controllable width
+    1. It's derived from geometry (contours), not filled regions
+    2. It has explicit, controllable width via cv2.drawContours thickness
     3. It's painted last, bypassing snapping/smoothing/morphology/anti-aliasing
     4. It never goes through operations that collapse sub-pixel features
     
@@ -224,8 +224,7 @@ def render_green_outline_from_edges(img, stroke_width=4):
     yellow_pixel_count = np.sum(yellow_mask > 0)
     print(f"  Found {yellow_pixel_count:,} yellow pixels")
     
-    # Find the outer contour of yellow regions for clean edge detection
-    # Using findContours gives us the exact boundary rather than relying on Canny
+    # Find the outer contours of yellow regions
     contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     if not contours:
@@ -235,25 +234,27 @@ def render_green_outline_from_edges(img, stroke_width=4):
     print(f"  Found {len(contours)} yellow region contours")
     
     # Create green stroke by drawing contours with specified thickness
-    # Draw OUTSIDE the yellow by first dilating, then masking out yellow
+    # We draw the contours OUTSIDE the yellow by:
+    # 1. Drawing thick contours on a separate mask
+    # 2. Subtracting the original yellow to ensure no overlap
     green_stroke_mask = np.zeros(img.shape[:2], dtype=np.uint8)
     
-    # Draw contours with thickness to create the outline
-    # We draw filled contours dilated, then subtract original yellow
-    yellow_dilated = cv2.dilate(yellow_mask, 
-                                 cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (stroke_width * 2 + 1, stroke_width * 2 + 1)), 
-                                 iterations=1)
+    # Draw contours with the stroke width as thickness
+    # The contours are the boundary of yellow, so drawing with thickness
+    # will extend both inward and outward. We'll mask out the inward part.
+    cv2.drawContours(green_stroke_mask, contours, -1, 255, thickness=stroke_width)
     
-    # Green outline = dilated yellow - original yellow (the outer ring)
-    green_stroke_mask = (yellow_dilated > 0) & (yellow_mask == 0)
+    # CRITICAL: Mask out yellow interior so green only appears OUTSIDE yellow
+    # This ensures green is an outline, not overlapping the yellow fill
+    green_stroke_mask = (green_stroke_mask > 0) & (yellow_mask == 0)
     
     # Find blue background regions
     blue_mask = np.all(img == sky_blue, axis=2).astype(np.uint8) * 255
     
-    # Dilate blue significantly to ensure green can appear near blue regions
-    # Use a larger kernel to be more permissive
+    # Dilate blue slightly to ensure green can appear at the yellow-blue boundary
+    # Use a moderate kernel to be permissive without being excessive
     blue_dilated = cv2.dilate(blue_mask, 
-                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (stroke_width * 4, stroke_width * 4)), 
+                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (stroke_width * 2, stroke_width * 2)), 
                                iterations=1)
     
     # Green should appear where it's in the stroke region AND near blue
