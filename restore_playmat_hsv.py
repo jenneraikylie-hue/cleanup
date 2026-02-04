@@ -32,8 +32,8 @@ import multiprocessing
 
 # Auto-detect optimal thread count (leave some cores free for system)
 # Default to 1 worker (sequential processing) to prevent memory exhaustion
-# Since we're dealing with very large high-resolution images, processing one
-# at a time prevents system crashes due to excessive RAM usage
+# when dealing with very large high-resolution images. Processing one at a
+# time prevents system crashes due to excessive RAM usage on memory-constrained systems.
 # Users can still use --workers N to enable parallel processing if needed
 DEFAULT_WORKERS = 1
 
