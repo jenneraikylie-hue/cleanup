@@ -31,16 +31,16 @@ That's it! The START_HERE.bat script automatically installs dependencies and pro
 The script is optimized for high-powered computers with multiple CPU cores and optional GPU acceleration:
 
 ### Parallel Processing
-Process multiple images simultaneously using multiple CPU cores:
+By default, images are processed **one at a time** for memory safety with large images. Enable parallel processing if you have smaller images and abundant RAM:
 ```bash
-# Auto-detect optimal worker count (default: 4 workers max for memory safety)
+# Default: Sequential processing (1 image at a time - safest for large images)
 python restore_playmat_hsv.py scans/
 
-# Specify number of parallel workers (use cautiously - high values can cause crashes)
-python restore_playmat_hsv.py scans/ --workers 8
+# Enable parallel processing (use cautiously - can cause crashes with large images)
+python restore_playmat_hsv.py scans/ --workers 4
 ```
 
-**⚠️ Important**: Each worker loads a full high-resolution image into memory. The default is capped at 4 workers to prevent memory exhaustion and system crashes. Only increase `--workers` if you have abundant RAM (32GB+) and are processing smaller images.
+**⚠️ Important**: Each worker loads a full high-resolution image into memory. Since we're dealing with large images, the default is **1 worker** (sequential) to prevent memory exhaustion and system crashes. Only increase `--workers` if you have abundant RAM (32GB+) and smaller images.
 
 ### GPU Acceleration (CUDA)
 If you have an NVIDIA GPU with CUDA support, enable GPU acceleration for faster processing:
@@ -55,7 +55,7 @@ python restore_playmat_hsv.py scans/ --workers 8 --use-gpu
 ### Performance Options
 | Option | Description |
 |--------|-------------|
-| `--workers N` | Number of parallel workers (default: 4 max, auto-detect based on CPU cores) |
+| `--workers N` | Number of parallel workers (default: 1 for memory safety with large images) |
 | `--use-gpu` | Enable CUDA/GPU acceleration if available |
 | `--sequential` | Force sequential processing (disable parallelism) |
 
@@ -84,7 +84,7 @@ python restore_playmat_hsv.py scans/ --workers 8 --use-gpu
 
 **Colors look wrong**: Use START_HERE.bat which runs the correct HSV version
 
-**Out of memory**: Large images with 3x upscaling require significant RAM. The script defaults to max 4 parallel workers to prevent crashes. Process fewer images at once or use `--workers 1` for very large images or systems with limited RAM.
+**Out of memory**: Large images with 3x upscaling require significant RAM. The script defaults to sequential processing (1 image at a time) to prevent crashes with large images.
 
 ---
 
