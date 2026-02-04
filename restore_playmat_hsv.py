@@ -106,6 +106,7 @@ PALETTE_NAMES = list(PALETTE.keys())
 def load_and_upscale(image_path, scale=3, use_gpu=False):
     """
     Load image and upscale for better processing.
+    Skip upscaling for already large images to prevent memory exhaustion.
     
     Args:
         image_path: Path to the image file
@@ -120,7 +121,19 @@ def load_and_upscale(image_path, scale=3, use_gpu=False):
     original_size = (img.shape[1], img.shape[0])
     print(f"Original size: {original_size}")
     
-    # Upscale 3x for better processing
+    # Calculate total pixels
+    total_pixels = img.shape[0] * img.shape[1]
+    
+    # Skip upscaling for large images (> 10 megapixels) to prevent memory exhaustion
+    # Memory usage for palette snapping: num_pixels * 10 colors * 4 bytes (float32)
+    # For 10MP upscaled 3x = 90MP * 10 * 4 = 3.6 GB just for one array
+    MAX_PIXELS_FOR_UPSCALE = 10_000_000  # 10 megapixels
+    
+    if total_pixels > MAX_PIXELS_FOR_UPSCALE:
+        print(f"Image is large ({total_pixels:,} pixels > {MAX_PIXELS_FOR_UPSCALE:,}), skipping upscaling to prevent memory exhaustion")
+        return img, original_size
+    
+    # Upscale 3x for better processing (only for smaller images)
     new_size = (img.shape[1] * scale, img.shape[0] * scale)
     
     # Use GPU acceleration if available and enabled

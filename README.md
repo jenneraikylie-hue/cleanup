@@ -84,7 +84,7 @@ python restore_playmat_hsv.py scans/ --workers 8 --use-gpu
 
 **Colors look wrong**: Use START_HERE.bat which runs the correct HSV version
 
-**Out of memory**: Large images with 3x upscaling require significant RAM. The script defaults to sequential processing (1 image at a time) to prevent crashes with large images.
+**Out of memory**: The script automatically skips upscaling for large images (>10 megapixels) to prevent memory exhaustion. If you still encounter memory errors, try processing fewer images at once or processing smaller image files.
 
 ---
 
