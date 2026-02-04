@@ -143,7 +143,7 @@ def load_and_upscale(image_path, scale=2, use_gpu=False):
     return img_large, original_size
 
 
-def preprocess_with_hsv(img):
+def preprocess_with_hsv(img, use_natural_green=False, skip_infill=False):
     """
     Pre-process image using HSV color space for robust color detection.
     This avoids BGR threshold confusion under blue-biased lighting.
@@ -203,46 +203,68 @@ def preprocess_with_hsv(img):
     yellow_mask_closed = cv2.morphologyEx(yellow_mask_uint8, cv2.MORPH_CLOSE, yellow_kernel, iterations=2)
     yellow_mask_opened = cv2.morphologyEx(yellow_mask_closed, cv2.MORPH_OPEN, yellow_kernel, iterations=1)
     
-    # Fill holes in yellow regions
-    contours, _ = cv2.findContours(yellow_mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    yellow_filled = np.zeros_like(yellow_mask_opened)
-    cv2.drawContours(yellow_filled, contours, -1, 255, -1)
+    # Fill holes in yellow regions (skip if skip_infill is enabled)
+    if skip_infill:
+        print("  Skipping yellow hole filling (--skip-infill enabled)")
+        yellow_mask_final = yellow_mask_opened > 0
+    else:
+        contours, _ = cv2.findContours(yellow_mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        yellow_filled = np.zeros_like(yellow_mask_opened)
+        cv2.drawContours(yellow_filled, contours, -1, 255, -1)
+        yellow_mask_final = yellow_filled > 0
     
-    yellow_mask_final = yellow_filled > 0
     img_processed[yellow_mask_final] = bright_yellow
     yellow_count = np.sum(yellow_mask_final)
     print(f"  Yellow elements: {yellow_count:,} pixels → bright_yellow")
     
-    # ==== 4. NEON GREEN (derived as outside boundary of yellow) ====
-    # Green outline should ONLY exist on the outside edge of yellow, facing blue
-    # This ensures green is an accent/halo, not a fill
-    
-    # Dilate yellow slightly to create an outer ring where green should live
-    green_ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    yellow_dilated_for_green = cv2.dilate(yellow_filled, green_ring_kernel, iterations=1)
-    
-    # The green ring is: dilated_yellow - original_yellow (the outer edge only)
-    green_ring = yellow_dilated_for_green & ~yellow_filled
-    
-    # Only keep green ring pixels that are adjacent to blue (the background)
-    # This ensures green only appears on the outside, not between touching yellow regions
-    blue_mask_uint8 = blue_mask.astype(np.uint8) * 255
-    blue_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    blue_dilated = cv2.dilate(blue_mask_uint8, blue_neighbor_kernel, iterations=1)
-    
-    # Green outline = ring pixels that touch blue
-    green_mask_final = (green_ring > 0) & (blue_dilated > 0)
-    
-    # Thin the green outline to 1-2 pixels using erosion
-    green_mask_uint8 = green_mask_final.astype(np.uint8) * 255
-    thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    green_mask_thinned = cv2.erode(green_mask_uint8, thin_kernel, iterations=1)
-    
-    # If erosion removed too much, use original
-    if np.sum(green_mask_thinned) < np.sum(green_mask_uint8) * 0.3:
-        green_mask_thinned = green_mask_uint8
-    
-    green_mask_final = green_mask_thinned > 0
+    # ==== 4. NEON GREEN ====
+    if use_natural_green:
+        # Use direct HSV detection for green (preserves original green from image)
+        print("  Using natural green detection from original image (--use-natural-green enabled)")
+        # Green hue range: 36-85 degrees (between yellow and cyan)
+        # Use broader saturation/value to catch all green variants
+        green_mask = (h >= 36) & (h <= 85) & (s > 30) & (v > 50) & ~yellow_mask_final & ~blue_mask & ~white_mask
+        green_mask_final = green_mask
+    else:
+        # ==== NEON GREEN (derived as outside boundary of yellow) ====
+        # Green outline should ONLY exist on the outside edge of yellow, facing blue
+        # This ensures green is an accent/halo, not a fill
+        
+        # For derived green, we need the filled yellow
+        if skip_infill:
+            # Re-fill yellow for green derivation only
+            contours, _ = cv2.findContours(yellow_mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            yellow_filled = np.zeros_like(yellow_mask_opened)
+            cv2.drawContours(yellow_filled, contours, -1, 255, -1)
+        else:
+            yellow_filled = yellow_mask_final.astype(np.uint8) * 255
+        
+        # Dilate yellow slightly to create an outer ring where green should live
+        green_ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        yellow_dilated_for_green = cv2.dilate(yellow_filled, green_ring_kernel, iterations=1)
+        
+        # The green ring is: dilated_yellow - original_yellow (the outer edge only)
+        green_ring = yellow_dilated_for_green & ~yellow_filled
+        
+        # Only keep green ring pixels that are adjacent to blue (the background)
+        # This ensures green only appears on the outside, not between touching yellow regions
+        blue_mask_uint8 = blue_mask.astype(np.uint8) * 255
+        blue_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        blue_dilated = cv2.dilate(blue_mask_uint8, blue_neighbor_kernel, iterations=1)
+        
+        # Green outline = ring pixels that touch blue
+        green_mask_final = (green_ring > 0) & (blue_dilated > 0)
+        
+        # Thin the green outline to 1-2 pixels using erosion
+        green_mask_uint8 = green_mask_final.astype(np.uint8) * 255
+        thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        green_mask_thinned = cv2.erode(green_mask_uint8, thin_kernel, iterations=1)
+        
+        # If erosion removed too much, use original
+        if np.sum(green_mask_thinned) < np.sum(green_mask_uint8) * 0.3:
+            green_mask_thinned = green_mask_uint8
+        
+        green_mask_final = green_mask_thinned > 0
     
     img_processed[green_mask_final] = neon_green
     green_count = np.sum(green_mask_final)
@@ -441,10 +463,11 @@ def detect_text_regions(img):
     return protected_mask
 
 
-def morphological_cleanup(img, kernel_size=3, text_mask=None):
+def morphological_cleanup(img, kernel_size=3, text_mask=None, skip_infill=False):
     """
     Apply gentle morphological operations to clean up noise.
     UPDATED: Reduced kernel size and iterations to preserve thin outlines.
+    UPDATED: Skip MORPH_CLOSE when skip_infill is True to preserve holes in text.
     """
     print(f"Applying gentle morphological cleanup (kernel={kernel_size})...")
     
@@ -456,13 +479,22 @@ def morphological_cleanup(img, kernel_size=3, text_mask=None):
     opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel, iterations=1)
     
     # 2. Closing: Fills small dark holes.
-    cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # Skip this if skip_infill is enabled to preserve holes in text (like "o", "e", "a")
+    if skip_infill:
+        print("  Skipping MORPH_CLOSE (--skip-infill enabled) to preserve holes in text")
+        cleaned = opened
+    else:
+        cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=1)
     
     # If text mask provided, blend original with cleaned to preserve text
     if text_mask is not None:
         print("  Applying text protection - preserving original in text regions...")
         text_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        text_cleaned = cv2.morphologyEx(img, cv2.MORPH_CLOSE, text_kernel, iterations=1)
+        if skip_infill:
+            # Skip MORPH_CLOSE for text regions too
+            text_cleaned = img
+        else:
+            text_cleaned = cv2.morphologyEx(img, cv2.MORPH_CLOSE, text_kernel, iterations=1)
         
         text_mask_3ch = cv2.cvtColor(text_mask, cv2.COLOR_GRAY2BGR)
         text_mask_float = text_mask_3ch.astype(np.float32) / 255.0
@@ -960,7 +992,7 @@ def solidify_color_regions(img, kernel_size=5):
     return img_solid
 
 
-def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalization=False, skip_despec=False):
+def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalization=False, skip_despec=False, use_natural_green=False, skip_infill=False):
     """
     Main restoration pipeline.
     
@@ -970,6 +1002,8 @@ def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalizat
         use_gpu: Enable CUDA/GPU acceleration for supported operations
         skip_outline_normalization: Skip outline width normalization (preserves original outlines)
         skip_despec: Skip isolated spec removal (faster processing)
+        use_natural_green: Use natural green detection instead of deriving from yellow
+        skip_infill: Skip hole-filling operations (preserves holes in text)
     """
     print(f"\n{'='*60}")
     print(f"Processing: {Path(image_path).name}")
@@ -982,13 +1016,13 @@ def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalizat
     text_mask = detect_text_regions(img_large)
     
     # Phase 3: HSV-based color preprocessing
-    img_preprocessed = preprocess_with_hsv(img_large)
+    img_preprocessed = preprocess_with_hsv(img_large, use_natural_green=use_natural_green, skip_infill=skip_infill)
     
     # Phase 4a: Bilateral filtering for edge-preserving smoothing (GPU accelerated if enabled)
     img_smooth = bilateral_smooth_edges(img_preprocessed, use_gpu=use_gpu)
     
     # Phase 4b: Morphological cleanup with text protection
-    img_cleaned = morphological_cleanup(img_smooth, text_mask=text_mask)
+    img_cleaned = morphological_cleanup(img_smooth, text_mask=text_mask, skip_infill=skip_infill)
     
     # Phase 4c: Snap to exact palette colors
     img_quantized = snap_to_palette(img_cleaned)
@@ -1064,19 +1098,22 @@ def process_single_image(args):
     Wrapper function for parallel processing.
     
     Args:
-        args: Tuple of (image_path, output_dir, use_gpu, skip_outline_normalization, skip_despec)
+        args: Tuple of (image_path, output_dir, use_gpu, skip_outline_normalization, skip_despec, use_natural_green, skip_infill)
     
     Returns:
         Tuple of (image_path, success, result_or_error)
     """
-    image_path, output_dir, use_gpu, skip_outline_normalization, skip_despec = args
+    image_path, output_dir, use_gpu, skip_outline_normalization, skip_despec, use_natural_green, skip_infill = args
     try:
         result = restore_image(image_path, output_dir, use_gpu=use_gpu, 
                               skip_outline_normalization=skip_outline_normalization,
-                              skip_despec=skip_despec)
+                              skip_despec=skip_despec,
+                              use_natural_green=use_natural_green,
+                              skip_infill=skip_infill)
         return (image_path, True, result)
     except Exception as e:
         return (image_path, False, str(e))
+
 
 
 def main():
@@ -1089,6 +1126,8 @@ def main():
         --sequential                    : Force sequential processing (disables parallelism)
         --skip-outline-normalization    : Skip outline width normalization (preserves original outlines)
         --skip-despec                   : Skip isolated spec removal (faster processing)
+        --use-natural-green             : Use natural green detection from original image
+        --skip-infill                   : Skip hole-filling operations (preserves holes in text)
     
     Examples:
         python restore_playmat_hsv.py scans/                                # Auto-parallel processing
@@ -1097,6 +1136,8 @@ def main():
         python restore_playmat_hsv.py scans/ --sequential                   # Sequential processing
         python restore_playmat_hsv.py scans/ --skip-outline-normalization   # Preserve original outlines
         python restore_playmat_hsv.py scans/ --skip-despec                  # Skip slow spec removal
+        python restore_playmat_hsv.py scans/ --use-natural-green            # Detect green from original
+        python restore_playmat_hsv.py scans/ --skip-infill                  # Preserve holes in text
     """
     parser = argparse.ArgumentParser(
         description='Vinyl Playmat Digital Restoration - HSV-Based Implementation',
@@ -1108,6 +1149,8 @@ Performance Options for High-Powered Computers:
   --sequential                    Force sequential processing (disable parallelism)
   --skip-outline-normalization    Skip outline width normalization (preserves original outlines)
   --skip-despec                   Skip isolated spec removal (faster processing)
+  --use-natural-green             Use natural green detection from original image
+  --skip-infill                   Skip hole-filling operations (preserves holes in text)
 
 Examples:
   %(prog)s scans/                                 # Process with auto-detected parallelism
@@ -1116,6 +1159,8 @@ Examples:
   %(prog)s scan.jpg                               # Process single image
   %(prog)s scans/ --skip-outline-normalization    # Preserve green outlines
   %(prog)s scans/ --skip-despec                   # Skip spec removal for speed
+  %(prog)s scans/ --use-natural-green             # Detect green from original image
+  %(prog)s scans/ --skip-infill                   # Preserve holes in text
         """
     )
     parser.add_argument('input_path', help='Image file or directory to process')
@@ -1129,6 +1174,10 @@ Examples:
                         help='Skip outline width normalization (preserves original outlines)')
     parser.add_argument('--skip-despec', action='store_true',
                         help='Skip isolated spec removal (faster processing)')
+    parser.add_argument('--use-natural-green', action='store_true',
+                        help='Use natural green detection from original image')
+    parser.add_argument('--skip-infill', action='store_true',
+                        help='Skip hole-filling operations (preserves holes in text)')
     
     args = parser.parse_args()
     input_path = args.input_path
@@ -1150,7 +1199,9 @@ Examples:
         # Single image - no parallelism needed
         restore_image(input_path, output_dir, use_gpu=settings['use_gpu'],
                      skip_outline_normalization=args.skip_outline_normalization,
-                     skip_despec=args.skip_despec)
+                     skip_despec=args.skip_despec,
+                     use_natural_green=args.use_natural_green,
+                     skip_infill=args.skip_infill)
     elif os.path.isdir(input_path):
         # Directory - use parallel processing for multiple images
         image_files = []
@@ -1172,7 +1223,8 @@ Examples:
             # Prepare arguments for parallel processing
             process_args = [
                 (str(img_path), output_dir, settings['use_gpu'], 
-                 args.skip_outline_normalization, args.skip_despec)
+                 args.skip_outline_normalization, args.skip_despec,
+                 args.use_natural_green, args.skip_infill)
                 for img_path in image_files
             ]
             
@@ -1214,7 +1266,9 @@ Examples:
                 try:
                     restore_image(str(img_path), output_dir, use_gpu=settings['use_gpu'],
                                  skip_outline_normalization=args.skip_outline_normalization,
-                                 skip_despec=args.skip_despec)
+                                 skip_despec=args.skip_despec,
+                                 use_natural_green=args.use_natural_green,
+                                 skip_infill=args.skip_infill)
                 except Exception as e:
                     print(f"Error processing {img_path}: {e}")
                     continue
