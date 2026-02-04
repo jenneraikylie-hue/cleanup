@@ -32,8 +32,8 @@ import multiprocessing
 
 # Auto-detect optimal thread count (leave some cores free for system)
 # Default to 1 worker (sequential processing) to prevent memory exhaustion
-# when dealing with very large high-resolution images. Processing one at a
-# time prevents system crashes due to excessive RAM usage on memory-constrained systems.
+# Since we're dealing with very large high-resolution images, processing one
+# at a time prevents system crashes due to excessive RAM usage
 # Users can still use --workers N to enable parallel processing if needed
 DEFAULT_WORKERS = 1
 
@@ -106,7 +106,6 @@ PALETTE_NAMES = list(PALETTE.keys())
 def load_and_upscale(image_path, scale=3, use_gpu=False):
     """
     Load image and upscale for better processing.
-    Skip upscaling for already large images to prevent memory exhaustion.
     
     Args:
         image_path: Path to the image file
@@ -121,19 +120,7 @@ def load_and_upscale(image_path, scale=3, use_gpu=False):
     original_size = (img.shape[1], img.shape[0])
     print(f"Original size: {original_size}")
     
-    # Calculate total pixels
-    total_pixels = img.shape[0] * img.shape[1]
-    
-    # Skip upscaling for large images (> 10 megapixels) to prevent memory exhaustion
-    # Memory usage for palette snapping: num_pixels * 10 colors * 4 bytes (float32)
-    # For 10MP upscaled 3x = 90MP * 10 * 4 = 3.6 GB just for one array
-    MAX_PIXELS_FOR_UPSCALE = 10_000_000  # 10 megapixels
-    
-    if total_pixels > MAX_PIXELS_FOR_UPSCALE:
-        print(f"Image is large ({total_pixels:,} pixels > {MAX_PIXELS_FOR_UPSCALE:,}), skipping upscaling to prevent memory exhaustion")
-        return img, original_size
-    
-    # Upscale 3x for better processing (only for smaller images)
+    # Upscale 3x for better processing
     new_size = (img.shape[1] * scale, img.shape[0] * scale)
     
     # Use GPU acceleration if available and enabled
@@ -487,7 +474,7 @@ def morphological_cleanup(img, kernel_size=3, text_mask=None):
 def snap_to_palette(img, protect_outlines=False):
     """
     Snap every pixel to the nearest palette color using Euclidean distance.
-    UPDATED: Can protect outline color pixels from being reassigned.
+    Uses tile-based processing for large images to prevent memory exhaustion.
     """
     print("Snapping to palette colors...")
     
@@ -502,6 +489,76 @@ def snap_to_palette(img, protect_outlines=False):
             color_bgr = np.array(PALETTE[color_name], dtype=np.uint8)
             outline_mask |= np.all(img == color_bgr, axis=2)
     
+    # Calculate if we need tile-based processing
+    # Target: Each tile should use < 1 GB for palette snapping
+    # Memory = tile_pixels * 10 colors * 4 bytes (float32)
+    total_pixels = img.shape[0] * img.shape[1]
+    MAX_MEMORY_GB = 1.0
+    MAX_TILE_PIXELS = int((MAX_MEMORY_GB * 1024**3) / (10 * 4))
+    
+    if total_pixels <= MAX_TILE_PIXELS:
+        # Small enough to process in one go
+        print(f"  Processing entire image ({total_pixels:,} pixels)")
+        quantized = _snap_to_palette_single(img)
+    else:
+        # Use tile-based processing for large images
+        import math
+        tile_size = int(math.sqrt(MAX_TILE_PIXELS))
+        tiles_x = math.ceil(img.shape[1] / tile_size)
+        tiles_y = math.ceil(img.shape[0] / tile_size)
+        total_tiles = tiles_x * tiles_y
+        
+        print(f"  Image is large ({total_pixels:,} pixels), using tile-based processing")
+        print(f"  Processing in {tiles_x}x{tiles_y} tiles ({total_tiles} total), tile size ~{tile_size}x{tile_size}")
+        
+        quantized = np.zeros_like(img)
+        
+        # Process each tile
+        tile_num = 0
+        for ty in range(tiles_y):
+            for tx in range(tiles_x):
+                tile_num += 1
+                # Calculate tile boundaries
+                y_start = ty * tile_size
+                y_end = min((ty + 1) * tile_size, img.shape[0])
+                x_start = tx * tile_size
+                x_end = min((tx + 1) * tile_size, img.shape[1])
+                
+                # Extract tile
+                tile = img[y_start:y_end, x_start:x_end]
+                
+                # Process tile
+                tile_quantized = _snap_to_palette_single(tile, show_stats=False)
+                
+                # Put tile back
+                quantized[y_start:y_end, x_start:x_end] = tile_quantized
+                
+                # Progress update
+                if tile_num % max(1, total_tiles // 10) == 0 or tile_num == total_tiles:
+                    print(f"    Processed tile {tile_num}/{total_tiles} ({100*tile_num//total_tiles}%)")
+    
+    # Restore protected outline pixels
+    if protect_outlines and outline_mask is not None:
+        quantized[outline_mask] = original_img[outline_mask]
+    
+    # Count total pixels per color (full image stats)
+    print("  Color distribution:")
+    for color_name, color_bgr in PALETTE.items():
+        color_array = np.array(color_bgr, dtype=np.uint8)
+        mask = np.all(quantized == color_array, axis=2)
+        count = np.sum(mask)
+        if count > 0:
+            pct = 100.0 * count / total_pixels
+            print(f"    {color_name}: {count:,} pixels ({pct:.2f}%)")
+    
+    return quantized
+
+
+def _snap_to_palette_single(img, show_stats=True):
+    """
+    Helper function to snap a single image/tile to palette colors.
+    This is the core snapping logic extracted for reuse.
+    """
     # Reshape image to (num_pixels, 3)
     pixels = img.reshape(-1, 3).astype(np.float32)
     
@@ -518,16 +575,13 @@ def snap_to_palette(img, protect_outlines=False):
     # Reshape back to image
     quantized = quantized_pixels.reshape(img.shape)
     
-    # Restore protected outline pixels
-    if protect_outlines and outline_mask is not None:
-        quantized[outline_mask] = original_img[outline_mask]
-    
-    # Count pixels per color
-    unique, counts = np.unique(closest_indices, return_counts=True)
-    print("  Color distribution:")
-    for idx, count in zip(unique, counts):
-        pct = 100.0 * count / len(pixels)
-        print(f"    {PALETTE_NAMES[idx]}: {count:,} pixels ({pct:.2f}%)")
+    if show_stats:
+        # Count pixels per color
+        unique, counts = np.unique(closest_indices, return_counts=True)
+        print("  Color distribution:")
+        for idx, count in zip(unique, counts):
+            pct = 100.0 * count / len(pixels)
+            print(f"    {PALETTE_NAMES[idx]}: {count:,} pixels ({pct:.2f}%)")
     
     return quantized
 
