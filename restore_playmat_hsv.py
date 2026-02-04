@@ -865,7 +865,7 @@ def _snap_to_right_angles(approx):
         # Fit a minimum area rectangle to get perfectly straight edges
         rect = cv2.minAreaRect(approx)
         box = cv2.boxPoints(rect)
-        return np.int0(box).reshape(-1, 1, 2)
+        return np.int32(box).reshape(-1, 1, 2)
     
     return approx
 
