@@ -26,6 +26,43 @@ That's it! The START_HERE.bat script automatically installs dependencies and pro
 - **Preserves**: Logos, text, stars, silhouettes, outlines with accurate colors
 - **Output**: Flat vector-style PNGs with 9-color palette (100% exact colors, zero noise)
 
+## Performance Optimizations for High-Powered Computers
+
+The script is optimized for high-powered computers with multiple CPU cores and optional GPU acceleration:
+
+### Parallel Processing
+Process multiple images simultaneously using multiple CPU cores:
+```bash
+# Auto-detect optimal worker count based on CPU cores
+python restore_playmat_hsv.py scans/
+
+# Specify number of parallel workers (e.g., 16 workers)
+python restore_playmat_hsv.py scans/ --workers 16
+```
+
+### GPU Acceleration (CUDA)
+If you have an NVIDIA GPU with CUDA support, enable GPU acceleration for faster processing:
+```bash
+# Enable GPU acceleration
+python restore_playmat_hsv.py scans/ --use-gpu
+
+# Combine with parallel processing
+python restore_playmat_hsv.py scans/ --workers 8 --use-gpu
+```
+
+### Performance Options
+| Option | Description |
+|--------|-------------|
+| `--workers N` | Number of parallel workers (default: auto-detect based on CPU cores) |
+| `--use-gpu` | Enable CUDA/GPU acceleration if available |
+| `--sequential` | Force sequential processing (disable parallelism) |
+
+### System Requirements for Best Performance
+- **CPU**: Multi-core processor (8+ cores recommended for batch processing)
+- **RAM**: 16GB+ recommended for large high-resolution scans
+- **GPU** (optional): NVIDIA GPU with CUDA support for accelerated processing
+- **Storage**: SSD recommended for faster I/O with large image files
+
 ## Files in This Repository
 
 ### ✅ USE THESE
@@ -44,6 +81,8 @@ That's it! The START_HERE.bat script automatically installs dependencies and pro
 **Python not found**: Install Python 3.7+ from python.org and check "Add Python to PATH"
 
 **Colors look wrong**: Use START_HERE.bat which runs the correct HSV version
+
+**Out of memory**: Large images with 3x upscaling require significant RAM. Process fewer images at once or use `--workers 1` to reduce memory usage.
 
 ---
 
