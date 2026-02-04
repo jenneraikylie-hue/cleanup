@@ -31,7 +31,10 @@ import multiprocessing
 # ============================================================================
 
 # Auto-detect optimal thread count (leave some cores free for system)
-DEFAULT_WORKERS = max(1, multiprocessing.cpu_count() - 1)
+# Cap at 4 workers to prevent memory exhaustion on high-powered computers
+# Each worker loads a full high-resolution image into memory, so too many
+# parallel workers can cause system crashes due to excessive RAM usage
+DEFAULT_WORKERS = min(4, max(1, multiprocessing.cpu_count() - 1))
 
 # Enable OpenCV optimizations
 cv2.setUseOptimized(True)
