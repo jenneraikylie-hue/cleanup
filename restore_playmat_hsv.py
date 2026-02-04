@@ -960,7 +960,7 @@ def solidify_color_regions(img, kernel_size=5):
     return img_solid
 
 
-def restore_image(image_path, output_dir, use_gpu=False):
+def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalization=False, skip_despec=False):
     """
     Main restoration pipeline.
     
@@ -968,6 +968,8 @@ def restore_image(image_path, output_dir, use_gpu=False):
         image_path: Path to the input image
         output_dir: Directory to save the output
         use_gpu: Enable CUDA/GPU acceleration for supported operations
+        skip_outline_normalization: Skip outline width normalization (preserves original outlines)
+        skip_despec: Skip isolated spec removal (faster processing)
     """
     print(f"\n{'='*60}")
     print(f"Processing: {Path(image_path).name}")
@@ -992,10 +994,18 @@ def restore_image(image_path, output_dir, use_gpu=False):
     img_quantized = snap_to_palette(img_cleaned)
     
     # Phase 4d: Remove isolated specs (white dots, color noise)
-    img_despecked = remove_isolated_specs(img_quantized, min_area=50)
+    if skip_despec:
+        print("Skipping isolated spec removal (--skip-despec enabled)")
+        img_despecked = img_quantized
+    else:
+        img_despecked = remove_isolated_specs(img_quantized, min_area=50)
     
     # Phase 4e: Normalize outline widths for consistency
-    img_uniform = uniform_outline_width(img_despecked)
+    if skip_outline_normalization:
+        print("Skipping outline width normalization (--skip-outline-normalization enabled)")
+        img_uniform = img_despecked
+    else:
+        img_uniform = uniform_outline_width(img_despecked)
     
     # Phase 4f: Vectorize edges for clean, vector-like appearance
     # Straightens rectangles while preserving curves/circles
@@ -1032,7 +1042,10 @@ def restore_image(image_path, output_dir, use_gpu=False):
     img_final = snap_to_palette(img_final, protect_outlines=True)
     
     # Phase 7: Final spec removal at output resolution
-    img_final = remove_isolated_specs(img_final, min_area=20)
+    if skip_despec:
+        print("Skipping final isolated spec removal (--skip-despec enabled)")
+    else:
+        img_final = remove_isolated_specs(img_final, min_area=20)
     
     # Phase 8: Final edge smoothing at output resolution
     img_final = smooth_jagged_edges(img_final)
@@ -1051,14 +1064,16 @@ def process_single_image(args):
     Wrapper function for parallel processing.
     
     Args:
-        args: Tuple of (image_path, output_dir, use_gpu)
+        args: Tuple of (image_path, output_dir, use_gpu, skip_outline_normalization, skip_despec)
     
     Returns:
         Tuple of (image_path, success, result_or_error)
     """
-    image_path, output_dir, use_gpu = args
+    image_path, output_dir, use_gpu, skip_outline_normalization, skip_despec = args
     try:
-        result = restore_image(image_path, output_dir, use_gpu=use_gpu)
+        result = restore_image(image_path, output_dir, use_gpu=use_gpu, 
+                              skip_outline_normalization=skip_outline_normalization,
+                              skip_despec=skip_despec)
         return (image_path, True, result)
     except Exception as e:
         return (image_path, False, str(e))
@@ -1069,30 +1084,38 @@ def main():
     Main entry point with support for parallel processing on high-powered computers.
     
     Command line options:
-        --workers N    : Number of parallel workers (default: auto-detect based on CPU cores)
-        --use-gpu      : Enable CUDA/GPU acceleration if available
-        --sequential   : Force sequential processing (disables parallelism)
+        --workers N                     : Number of parallel workers (default: auto-detect based on CPU cores)
+        --use-gpu                       : Enable CUDA/GPU acceleration if available
+        --sequential                    : Force sequential processing (disables parallelism)
+        --skip-outline-normalization    : Skip outline width normalization (preserves original outlines)
+        --skip-despec                   : Skip isolated spec removal (faster processing)
     
     Examples:
-        python restore_playmat_hsv.py scans/                    # Auto-parallel processing
-        python restore_playmat_hsv.py scans/ --workers 8        # Use 8 parallel workers
-        python restore_playmat_hsv.py scans/ --use-gpu          # Enable GPU acceleration
-        python restore_playmat_hsv.py scans/ --sequential       # Sequential processing
+        python restore_playmat_hsv.py scans/                                # Auto-parallel processing
+        python restore_playmat_hsv.py scans/ --workers 8                    # Use 8 parallel workers
+        python restore_playmat_hsv.py scans/ --use-gpu                      # Enable GPU acceleration
+        python restore_playmat_hsv.py scans/ --sequential                   # Sequential processing
+        python restore_playmat_hsv.py scans/ --skip-outline-normalization   # Preserve original outlines
+        python restore_playmat_hsv.py scans/ --skip-despec                  # Skip slow spec removal
     """
     parser = argparse.ArgumentParser(
         description='Vinyl Playmat Digital Restoration - HSV-Based Implementation',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Performance Options for High-Powered Computers:
-  --workers N     Number of parallel workers (default: auto, based on CPU cores)
-  --use-gpu       Enable CUDA/GPU acceleration if available
-  --sequential    Force sequential processing (disable parallelism)
+  --workers N                     Number of parallel workers (default: auto, based on CPU cores)
+  --use-gpu                       Enable CUDA/GPU acceleration if available
+  --sequential                    Force sequential processing (disable parallelism)
+  --skip-outline-normalization    Skip outline width normalization (preserves original outlines)
+  --skip-despec                   Skip isolated spec removal (faster processing)
 
 Examples:
-  %(prog)s scans/                     # Process with auto-detected parallelism
-  %(prog)s scans/ --workers 16        # Use 16 parallel workers
-  %(prog)s scans/ --use-gpu           # Enable GPU acceleration
-  %(prog)s scan.jpg                   # Process single image
+  %(prog)s scans/                                 # Process with auto-detected parallelism
+  %(prog)s scans/ --workers 16                    # Use 16 parallel workers
+  %(prog)s scans/ --use-gpu                       # Enable GPU acceleration
+  %(prog)s scan.jpg                               # Process single image
+  %(prog)s scans/ --skip-outline-normalization    # Preserve green outlines
+  %(prog)s scans/ --skip-despec                   # Skip spec removal for speed
         """
     )
     parser.add_argument('input_path', help='Image file or directory to process')
@@ -1102,6 +1125,10 @@ Examples:
                         help='Enable CUDA/GPU acceleration if available')
     parser.add_argument('--sequential', action='store_true',
                         help='Force sequential processing (disable parallelism)')
+    parser.add_argument('--skip-outline-normalization', action='store_true',
+                        help='Skip outline width normalization (preserves original outlines)')
+    parser.add_argument('--skip-despec', action='store_true',
+                        help='Skip isolated spec removal (faster processing)')
     
     args = parser.parse_args()
     input_path = args.input_path
@@ -1121,7 +1148,9 @@ Examples:
     # Process single image or directory
     if os.path.isfile(input_path):
         # Single image - no parallelism needed
-        restore_image(input_path, output_dir, use_gpu=settings['use_gpu'])
+        restore_image(input_path, output_dir, use_gpu=settings['use_gpu'],
+                     skip_outline_normalization=args.skip_outline_normalization,
+                     skip_despec=args.skip_despec)
     elif os.path.isdir(input_path):
         # Directory - use parallel processing for multiple images
         image_files = []
@@ -1142,7 +1171,8 @@ Examples:
             
             # Prepare arguments for parallel processing
             process_args = [
-                (str(img_path), output_dir, settings['use_gpu'])
+                (str(img_path), output_dir, settings['use_gpu'], 
+                 args.skip_outline_normalization, args.skip_despec)
                 for img_path in image_files
             ]
             
@@ -1182,7 +1212,9 @@ Examples:
             print(f"\nProcessing {num_images} images sequentially...")
             for img_path in image_files:
                 try:
-                    restore_image(str(img_path), output_dir, use_gpu=settings['use_gpu'])
+                    restore_image(str(img_path), output_dir, use_gpu=settings['use_gpu'],
+                                 skip_outline_normalization=args.skip_outline_normalization,
+                                 skip_despec=args.skip_despec)
                 except Exception as e:
                     print(f"Error processing {img_path}: {e}")
                     continue
