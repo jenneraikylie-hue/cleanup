@@ -5,13 +5,80 @@ Removes wrinkles, glare, and texture from scanned vinyl playmat images
 while preserving logos, text, stars, and silhouettes with accurate colors.
 
 This version uses HSV color space for robust color detection under varying lighting.
+
+Performance Optimizations for High-Powered Computers:
+- Multi-threaded parallel image processing using ThreadPoolExecutor
+- OpenCV optimization flags (setNumThreads, setUseOptimized)
+- Optional CUDA/GPU acceleration if available
+- Configurable worker count (auto-detects CPU cores)
+- Memory-efficient batch processing
+
+Usage with performance options:
+    python restore_playmat_hsv.py scans/ --workers 8 --use-gpu
 """
 
 import cv2
 import numpy as np
 import os
 import sys
+import argparse
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
+
+# ============================================================================
+# PERFORMANCE CONFIGURATION
+# ============================================================================
+
+# Auto-detect optimal thread count (leave some cores free for system)
+DEFAULT_WORKERS = max(1, multiprocessing.cpu_count() - 1)
+
+# Enable OpenCV optimizations
+cv2.setUseOptimized(True)
+
+# Set OpenCV to use multiple threads for internal operations
+# This improves performance of operations like resize, filter, morphology
+cv2.setNumThreads(0)  # 0 = auto-detect optimal thread count
+
+# Check for CUDA/GPU support
+try:
+    GPU_AVAILABLE = hasattr(cv2, 'cuda') and hasattr(cv2.cuda, 'getCudaEnabledDeviceCount') and cv2.cuda.getCudaEnabledDeviceCount() > 0
+except cv2.error:
+    GPU_AVAILABLE = False
+
+
+def configure_performance(use_gpu=False, num_workers=None, verbose=True):
+    """
+    Configure performance settings for high-powered computers.
+    
+    Args:
+        use_gpu: Enable CUDA/GPU acceleration if available
+        num_workers: Number of parallel workers (None = auto-detect)
+        verbose: Print performance configuration
+    
+    Returns:
+        dict with performance settings
+    """
+    settings = {
+        'num_workers': num_workers or DEFAULT_WORKERS,
+        'use_gpu': use_gpu and GPU_AVAILABLE,
+        'opencv_threads': cv2.getNumThreads(),
+        'opencv_optimized': cv2.useOptimized(),
+    }
+    
+    if verbose:
+        print("\n" + "=" * 60)
+        print("PERFORMANCE CONFIGURATION")
+        print("=" * 60)
+        print(f"  CPU Cores Available: {multiprocessing.cpu_count()}")
+        print(f"  Parallel Workers: {settings['num_workers']}")
+        print(f"  OpenCV Threads: {settings['opencv_threads']} (per operation)")
+        print(f"  OpenCV Optimized: {settings['opencv_optimized']}")
+        print(f"  GPU/CUDA Available: {GPU_AVAILABLE}")
+        print(f"  GPU Acceleration: {'ENABLED' if settings['use_gpu'] else 'DISABLED'}")
+        print("=" * 60 + "\n")
+    
+    return settings
 
 # Master Color Palette (BGR Format for OpenCV)
 PALETTE = {
@@ -32,8 +99,15 @@ PALETTE_ARRAY = np.array(list(PALETTE.values()), dtype=np.float32)
 PALETTE_NAMES = list(PALETTE.keys())
 
 
-def load_and_upscale(image_path, scale=3):
-    """Load image and upscale for better processing."""
+def load_and_upscale(image_path, scale=3, use_gpu=False):
+    """
+    Load image and upscale for better processing.
+    
+    Args:
+        image_path: Path to the image file
+        scale: Upscaling factor (default 3x)
+        use_gpu: Use CUDA/GPU acceleration for resize if available
+    """
     print(f"Loading image: {image_path}")
     img = cv2.imread(image_path)
     if img is None:
@@ -44,8 +118,22 @@ def load_and_upscale(image_path, scale=3):
     
     # Upscale 3x for better processing
     new_size = (img.shape[1] * scale, img.shape[0] * scale)
-    img_large = cv2.resize(img, new_size, interpolation=cv2.INTER_CUBIC)
-    print(f"Upscaled to: {new_size}")
+    
+    # Use GPU acceleration if available and enabled
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            gpu_img = cv2.cuda_GpuMat()
+            gpu_img.upload(img)
+            gpu_resized = cv2.cuda.resize(gpu_img, new_size, interpolation=cv2.INTER_CUBIC)
+            img_large = gpu_resized.download()
+            print(f"Upscaled to: {new_size} (GPU accelerated)")
+        except cv2.error:
+            # Fallback to CPU if GPU fails
+            img_large = cv2.resize(img, new_size, interpolation=cv2.INTER_CUBIC)
+            print(f"Upscaled to: {new_size} (CPU fallback)")
+    else:
+        img_large = cv2.resize(img, new_size, interpolation=cv2.INTER_CUBIC)
+        print(f"Upscaled to: {new_size}")
     
     return img_large, original_size
 
@@ -209,13 +297,34 @@ def preprocess_with_hsv(img):
     return img_processed
 
 
-def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50):
+def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50, use_gpu=False):
     """
     Apply bilateral filter to smooth texture while preserving edges.
     UPDATED: Reduced parameters (d=9, sigma=50) to preserve thin outlines like green borders.
+    
+    Args:
+        img: Input image
+        d: Diameter of each pixel neighborhood
+        sigma_color: Filter sigma in the color space
+        sigma_space: Filter sigma in the coordinate space
+        use_gpu: Use CUDA/GPU acceleration if available
     """
     print("Applying bilateral filter for edge-preserving smoothing...")
-    smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
+    
+    # Use GPU acceleration if available and enabled
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            gpu_img = cv2.cuda_GpuMat()
+            gpu_img.upload(img)
+            gpu_smoothed = cv2.cuda.bilateralFilter(gpu_img, d, sigma_color, sigma_space)
+            smoothed = gpu_smoothed.download()
+            print("  (GPU accelerated)")
+        except cv2.error:
+            # Fallback to CPU if GPU fails
+            smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
+    else:
+        smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
+    
     return smoothed
 
 
@@ -779,14 +888,21 @@ def solidify_color_regions(img, kernel_size=5):
     return img_solid
 
 
-def restore_image(image_path, output_dir):
-    """Main restoration pipeline."""
+def restore_image(image_path, output_dir, use_gpu=False):
+    """
+    Main restoration pipeline.
+    
+    Args:
+        image_path: Path to the input image
+        output_dir: Directory to save the output
+        use_gpu: Enable CUDA/GPU acceleration for supported operations
+    """
     print(f"\n{'='*60}")
     print(f"Processing: {Path(image_path).name}")
     print(f"{'='*60}")
     
-    # Phase 1: Load and upscale
-    img_large, original_size = load_and_upscale(image_path)
+    # Phase 1: Load and upscale (GPU accelerated if enabled)
+    img_large, original_size = load_and_upscale(image_path, use_gpu=use_gpu)
     
     # Phase 2: Detect text regions for protection BEFORE any processing
     text_mask = detect_text_regions(img_large)
@@ -794,8 +910,8 @@ def restore_image(image_path, output_dir):
     # Phase 3: HSV-based color preprocessing
     img_preprocessed = preprocess_with_hsv(img_large)
     
-    # Phase 4a: Bilateral filtering for edge-preserving smoothing
-    img_smooth = bilateral_smooth_edges(img_preprocessed)
+    # Phase 4a: Bilateral filtering for edge-preserving smoothing (GPU accelerated if enabled)
+    img_smooth = bilateral_smooth_edges(img_preprocessed, use_gpu=use_gpu)
     
     # Phase 4b: Morphological cleanup with text protection
     img_cleaned = morphological_cleanup(img_smooth, text_mask=text_mask)
@@ -827,7 +943,18 @@ def restore_image(image_path, output_dir):
     
     # Phase 5: Downscale back to original size
     print(f"Downscaling to original size: {original_size}")
-    img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
+    
+    # Use GPU acceleration for final resize if available
+    if use_gpu and GPU_AVAILABLE:
+        try:
+            gpu_img = cv2.cuda_GpuMat()
+            gpu_img.upload(img_solid)
+            gpu_resized = cv2.cuda.resize(gpu_img, original_size, interpolation=cv2.INTER_AREA)
+            img_final = gpu_resized.download()
+        except cv2.error:
+            img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
+    else:
+        img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
     
     # Phase 6: Final palette enforcement (protect outlines from being reassigned)
     img_final = snap_to_palette(img_final, protect_outlines=True)
@@ -844,18 +971,76 @@ def restore_image(image_path, output_dir):
     cv2.imwrite(output_path, img_final)
     print(f"\nSaved to: {output_path}")
     
-    return img_final
+    return output_path
+
+
+def process_single_image(args):
+    """
+    Wrapper function for parallel processing.
+    
+    Args:
+        args: Tuple of (image_path, output_dir, use_gpu)
+    
+    Returns:
+        Tuple of (image_path, success, result_or_error)
+    """
+    image_path, output_dir, use_gpu = args
+    try:
+        result = restore_image(image_path, output_dir, use_gpu=use_gpu)
+        return (image_path, True, result)
+    except Exception as e:
+        return (image_path, False, str(e))
 
 
 def main():
-    """Main entry point."""
-    if len(sys.argv) < 2:
-        print("Usage: python restore_playmat_hsv.py <image_or_directory>")
-        print("Example: python restore_playmat_hsv.py scan.jpg")
-        print("Example: python restore_playmat_hsv.py scans/")
-        sys.exit(1)
+    """
+    Main entry point with support for parallel processing on high-powered computers.
     
-    input_path = sys.argv[1]
+    Command line options:
+        --workers N    : Number of parallel workers (default: auto-detect based on CPU cores)
+        --use-gpu      : Enable CUDA/GPU acceleration if available
+        --sequential   : Force sequential processing (disables parallelism)
+    
+    Examples:
+        python restore_playmat_hsv.py scans/                    # Auto-parallel processing
+        python restore_playmat_hsv.py scans/ --workers 8        # Use 8 parallel workers
+        python restore_playmat_hsv.py scans/ --use-gpu          # Enable GPU acceleration
+        python restore_playmat_hsv.py scans/ --sequential       # Sequential processing
+    """
+    parser = argparse.ArgumentParser(
+        description='Vinyl Playmat Digital Restoration - HSV-Based Implementation',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Performance Options for High-Powered Computers:
+  --workers N     Number of parallel workers (default: auto, based on CPU cores)
+  --use-gpu       Enable CUDA/GPU acceleration if available
+  --sequential    Force sequential processing (disable parallelism)
+
+Examples:
+  %(prog)s scans/                     # Process with auto-detected parallelism
+  %(prog)s scans/ --workers 16        # Use 16 parallel workers
+  %(prog)s scans/ --use-gpu           # Enable GPU acceleration
+  %(prog)s scan.jpg                   # Process single image
+        """
+    )
+    parser.add_argument('input_path', help='Image file or directory to process')
+    parser.add_argument('--workers', type=int, default=None,
+                        help=f'Number of parallel workers (default: {DEFAULT_WORKERS})')
+    parser.add_argument('--use-gpu', action='store_true',
+                        help='Enable CUDA/GPU acceleration if available')
+    parser.add_argument('--sequential', action='store_true',
+                        help='Force sequential processing (disable parallelism)')
+    
+    args = parser.parse_args()
+    input_path = args.input_path
+    
+    # Configure performance settings
+    num_workers = 1 if args.sequential else args.workers
+    settings = configure_performance(
+        use_gpu=args.use_gpu,
+        num_workers=num_workers,
+        verbose=True
+    )
     
     # Create output directory
     output_dir = "output"
@@ -863,20 +1048,72 @@ def main():
     
     # Process single image or directory
     if os.path.isfile(input_path):
-        restore_image(input_path, output_dir)
+        # Single image - no parallelism needed
+        restore_image(input_path, output_dir, use_gpu=settings['use_gpu'])
     elif os.path.isdir(input_path):
+        # Directory - use parallel processing for multiple images
         image_files = []
         for ext in ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']:
             image_files.extend(Path(input_path).glob(ext))
         
-        print(f"Found {len(image_files)} images to process")
+        num_images = len(image_files)
+        print(f"Found {num_images} images to process")
         
-        for img_path in image_files:
-            try:
-                restore_image(str(img_path), output_dir)
-            except Exception as e:
-                print(f"Error processing {img_path}: {e}")
-                continue
+        if num_images == 0:
+            print("No images found in directory")
+            sys.exit(0)
+        
+        # Use parallel processing if multiple images and workers > 1
+        if settings['num_workers'] > 1 and num_images > 1:
+            print(f"\nProcessing {num_images} images with {settings['num_workers']} parallel workers...")
+            print("=" * 60)
+            
+            # Prepare arguments for parallel processing
+            process_args = [
+                (str(img_path), output_dir, settings['use_gpu'])
+                for img_path in image_files
+            ]
+            
+            # Process images in parallel using ThreadPoolExecutor
+            # ThreadPoolExecutor is chosen over ProcessPoolExecutor because:
+            # 1. Avoids pickle serialization issues with OpenCV objects
+            # 2. OpenCV operations are internally multi-threaded via cv2.setNumThreads()
+            # 3. Memory is shared between threads, reducing overhead for large images
+            successful = 0
+            failed = 0
+            
+            with ThreadPoolExecutor(max_workers=settings['num_workers']) as executor:
+                # Submit all tasks
+                futures = {
+                    executor.submit(process_single_image, args): args[0]
+                    for args in process_args
+                }
+                
+                # Process results as they complete
+                for future in as_completed(futures):
+                    image_path, success, result = future.result()
+                    if success:
+                        successful += 1
+                        print(f"[{successful + failed}/{num_images}] Completed: {Path(image_path).name}")
+                    else:
+                        failed += 1
+                        print(f"[{successful + failed}/{num_images}] Failed: {Path(image_path).name} - {result}")
+            
+            print(f"\n{'='*60}")
+            print(f"Parallel Processing Summary:")
+            print(f"  Successful: {successful}/{num_images}")
+            print(f"  Failed: {failed}/{num_images}")
+            print(f"  Workers used: {settings['num_workers']}")
+            print(f"{'='*60}")
+        else:
+            # Sequential processing
+            print(f"\nProcessing {num_images} images sequentially...")
+            for img_path in image_files:
+                try:
+                    restore_image(str(img_path), output_dir, use_gpu=settings['use_gpu'])
+                except Exception as e:
+                    print(f"Error processing {img_path}: {e}")
+                    continue
     else:
         print(f"Error: {input_path} is not a valid file or directory")
         sys.exit(1)
