@@ -22,6 +22,7 @@ import numpy as np
 import os
 import sys
 import argparse
+import math
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
@@ -502,7 +503,6 @@ def snap_to_palette(img, protect_outlines=False):
         quantized = _snap_to_palette_single(img)
     else:
         # Use tile-based processing for large images
-        import math
         tile_size = int(math.sqrt(MAX_TILE_PIXELS))
         tiles_x = math.ceil(img.shape[1] / tile_size)
         tiles_y = math.ceil(img.shape[0] / tile_size)
@@ -533,8 +533,9 @@ def snap_to_palette(img, protect_outlines=False):
                 # Put tile back
                 quantized[y_start:y_end, x_start:x_end] = tile_quantized
                 
-                # Progress update
-                if tile_num % max(1, total_tiles // 10) == 0 or tile_num == total_tiles:
+                # Progress update (every 10% or at completion, but skip first tile)
+                progress_interval = max(1, total_tiles // 10)
+                if (tile_num > 1 and tile_num % progress_interval == 0) or tile_num == total_tiles:
                     print(f"    Processed tile {tile_num}/{total_tiles} ({100*tile_num//total_tiles}%)")
     
     # Restore protected outline pixels
