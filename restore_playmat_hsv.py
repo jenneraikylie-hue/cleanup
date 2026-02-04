@@ -104,13 +104,13 @@ PALETTE_ARRAY = np.array(list(PALETTE.values()), dtype=np.float32)
 PALETTE_NAMES = list(PALETTE.keys())
 
 
-def load_and_upscale(image_path, scale=3, use_gpu=False):
+def load_and_upscale(image_path, scale=2, use_gpu=False):
     """
     Load image and upscale for better processing.
     
     Args:
         image_path: Path to the image file
-        scale: Upscaling factor (default 3x)
+        scale: Upscaling factor (default 2x)
         use_gpu: Use CUDA/GPU acceleration for resize if available
     """
     print(f"Loading image: {image_path}")
@@ -121,7 +121,7 @@ def load_and_upscale(image_path, scale=3, use_gpu=False):
     original_size = (img.shape[1], img.shape[0])
     print(f"Original size: {original_size}")
     
-    # Upscale 3x for better processing
+    # Upscale 2x for better processing
     new_size = (img.shape[1] * scale, img.shape[0] * scale)
     
     # Use GPU acceleration if available and enabled
