@@ -1115,7 +1115,6 @@ def process_single_image(args):
         return (image_path, False, str(e))
 
 
-
 def main():
     """
     Main entry point with support for parallel processing on high-powered computers.
