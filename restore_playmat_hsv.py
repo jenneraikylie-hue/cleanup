@@ -413,10 +413,10 @@ def preprocess_with_hsv(img, use_natural_green=False, skip_infill=False):
     black_count = np.sum(black_mask)
     print(f"  Black/deadspace: {black_count:,} pixels → black")
     
-    return img_processed
+    return img_processed, green_mask_final
 
 
-def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50, use_gpu=False, gpu_backend=None):
+def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50, use_gpu=False, gpu_backend=None, preserve_mask=None):
     """
     Apply bilateral filter to smooth texture while preserving edges.
     UPDATED: Reduced parameters (d=9, sigma=50) to preserve thin outlines like green borders.
@@ -467,6 +467,8 @@ def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50, use_gpu=Fal
     
     # CPU fallback - use true bilateral filter
     smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
+    if preserve_mask is not None:
+        smoothed[preserve_mask] = img[preserve_mask]
     return smoothed
 
 
@@ -578,7 +580,7 @@ def detect_text_regions(img):
     return protected_mask
 
 
-def morphological_cleanup(img, kernel_size=3, text_mask=None, skip_infill=False):
+def morphological_cleanup(img, kernel_size=3, text_mask=None, skip_infill=False, preserve_mask=None):
     """
     Apply gentle morphological operations to clean up noise.
     UPDATED: Reduced kernel size and iterations to preserve thin outlines.
@@ -615,6 +617,9 @@ def morphological_cleanup(img, kernel_size=3, text_mask=None, skip_infill=False)
         text_mask_float = text_mask_3ch.astype(np.float32) / 255.0
         
         cleaned = (text_mask_float * text_cleaned + (1 - text_mask_float) * cleaned).astype(np.uint8)
+
+    if preserve_mask is not None:
+        cleaned[preserve_mask] = img[preserve_mask]
     
     return cleaned
 
@@ -734,7 +739,7 @@ def _snap_to_palette_single(img, show_stats=True):
     return quantized
 
 
-def edge_preserving_smooth(img, sigma_color=75, sigma_space=75):
+def edge_preserving_smooth(img, sigma_color=75, sigma_space=75, preserve_mask=None):
     """
     Apply edge-preserving smoothing to reduce jaggedness on outlines
     without filling in or expanding color regions.
@@ -746,6 +751,8 @@ def edge_preserving_smooth(img, sigma_color=75, sigma_space=75):
     # This is less aggressive than contour-based smoothing and won't fill areas
     smoothed = cv2.bilateralFilter(img, d=9, sigmaColor=sigma_color, sigmaSpace=sigma_space)
     
+    if preserve_mask is not None:
+        smoothed[preserve_mask] = img[preserve_mask]
     return smoothed
 
 
@@ -807,7 +814,7 @@ def remove_isolated_specs(img, min_area=50):
     return img_clean
 
 
-def apply_anti_aliasing(img):
+def apply_anti_aliasing(img, preserve_mask=None):
     """
     Apply subtle anti-aliasing effect to color boundaries for smoother appearance.
     Uses guided filter to smooth transitions while maintaining sharp edges.
@@ -849,6 +856,8 @@ def apply_anti_aliasing(img):
     # Convert back to uint8
     result = (smoothed * 255).clip(0, 255).astype(np.uint8)
     
+    if preserve_mask is not None:
+        result[preserve_mask] = img[preserve_mask]
     return result
 
 
@@ -1057,11 +1066,14 @@ def smooth_jagged_edges(img):
             # Opening erodes thin strokes which destroys outline topology
             smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         else:
-            # FILLS: opening + closing is safe for solid regions
-            # Opening removes small protrusions (bumps outward)
-            # Closing removes small intrusions (bumps inward)
-            smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
+            # FILLS: avoid opening on yellow to preserve thin protrusions (thumbs/fingers)
+            if color_name == 'bright_yellow':
+                smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            else:
+                # Opening removes small protrusions (bumps outward)
+                # Closing removes small intrusions (bumps inward)
+                smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+                smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
         
         # Apply Gaussian blur then threshold to smooth edges
         blurred = cv2.GaussianBlur(smoothed, (3, 3), 0)
@@ -1073,7 +1085,7 @@ def smooth_jagged_edges(img):
     return img_result
 
 
-def solidify_color_regions(img, kernel_size=5):
+def solidify_color_regions(img, kernel_size=5, preserve_mask=None):
     """
     Apply median filter within each color region to remove gradients and texture.
     Smaller kernel (5 vs 11) to preserve detail better.
@@ -1104,7 +1116,77 @@ def solidify_color_regions(img, kernel_size=5):
             # Replace with median-blurred version
             img_solid[mask] = blurred[mask]
     
+    if preserve_mask is not None:
+        img_solid[preserve_mask] = img[preserve_mask]
     return img_solid
+
+
+def apply_green_outline_from_yellow(img, ring_size=5, blue_neighbor_size=5, seed_mask=None):
+    """
+    Rebuild neon green outline from final yellow and blue regions.
+    This ensures the outline follows the finalized yellow silhouette,
+    including complex contours (hands, shoes), without creating inner green lines.
+    """
+    print("Rebuilding neon green outline from final yellow regions...")
+
+    img_result = img.copy()
+
+    bright_yellow = np.array(PALETTE['bright_yellow'], dtype=np.uint8)
+    sky_blue = np.array(PALETTE['sky_blue'], dtype=np.uint8)
+    neon_green = np.array(PALETTE['neon_green'], dtype=np.uint8)
+
+    yellow_mask = np.all(img == bright_yellow, axis=2)
+    blue_mask = np.all(img == sky_blue, axis=2)
+    green_mask = np.all(img == neon_green, axis=2)
+
+    if seed_mask is not None:
+        seed_mask = seed_mask.astype(bool)
+        allowed_yellow = np.zeros_like(yellow_mask)
+        yellow_components, labels, stats, _ = cv2.connectedComponentsWithStats(
+            yellow_mask.astype(np.uint8),
+            connectivity=8
+        )
+        for label in range(1, yellow_components):
+            component_mask = labels == label
+            if np.any(seed_mask & component_mask):
+                allowed_yellow |= component_mask
+        yellow_mask = allowed_yellow
+
+    # Clear existing green to avoid fake inner lines.
+    if np.any(green_mask):
+        yellow_neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        yellow_neighbors = cv2.dilate(yellow_mask.astype(np.uint8) * 255, yellow_neighbor_kernel, iterations=1) > 0
+        img_result[green_mask & yellow_neighbors] = bright_yellow
+        img_result[green_mask & ~yellow_neighbors] = sky_blue
+
+    # Fill holes so internal gaps don't generate inner green rings.
+    yellow_mask_uint8 = yellow_mask.astype(np.uint8) * 255
+    contours, _ = cv2.findContours(yellow_mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    yellow_filled = np.zeros_like(yellow_mask_uint8)
+    cv2.drawContours(yellow_filled, contours, -1, 255, -1)
+    yellow_mask = yellow_filled > 0
+
+    # Build a boundary-only outline from the filled yellow mask.
+    ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_size, ring_size))
+    yellow_dilated = cv2.dilate(yellow_mask.astype(np.uint8) * 255, ring_kernel, iterations=1)
+    yellow_eroded = cv2.erode(yellow_mask.astype(np.uint8) * 255, ring_kernel, iterations=1)
+    yellow_edge = (yellow_dilated > 0) & (yellow_eroded == 0)
+
+    # Restrict to areas touching blue so the outline only appears outside.
+    blue_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (blue_neighbor_size, blue_neighbor_size))
+    blue_dilated = cv2.dilate(blue_mask.astype(np.uint8) * 255, blue_kernel, iterations=1) > 0
+    green_outline_mask = yellow_edge & blue_dilated
+
+    if seed_mask is not None:
+        seed_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        seed_dilated = cv2.dilate(seed_mask.astype(np.uint8) * 255, seed_kernel, iterations=1) > 0
+        green_outline_mask &= seed_dilated
+
+    img_result[green_outline_mask] = neon_green
+    green_count = np.sum(green_outline_mask)
+    print(f"  Neon green outlines rebuilt: {green_count:,} pixels → neon_green")
+
+    return img_result
 
 
 def restore_image(image_path, output_dir, use_gpu=False, gpu_backend=None, skip_outline_normalization=False, skip_despec=False, use_natural_green=False, skip_infill=False):
@@ -1132,13 +1214,27 @@ def restore_image(image_path, output_dir, use_gpu=False, gpu_backend=None, skip_
     text_mask = detect_text_regions(img_large)
     
     # Phase 3: HSV-based color preprocessing
-    img_preprocessed = preprocess_with_hsv(img_large, use_natural_green=use_natural_green, skip_infill=skip_infill)
+    img_preprocessed, green_outline_mask = preprocess_with_hsv(
+        img_large,
+        use_natural_green=use_natural_green,
+        skip_infill=skip_infill
+    )
     
     # Phase 4a: Bilateral filtering for edge-preserving smoothing (GPU accelerated if enabled)
-    img_smooth = bilateral_smooth_edges(img_preprocessed, use_gpu=use_gpu, gpu_backend=gpu_backend)
+    img_smooth = bilateral_smooth_edges(
+        img_preprocessed,
+        use_gpu=use_gpu,
+        gpu_backend=gpu_backend,
+        preserve_mask=green_outline_mask
+    )
     
     # Phase 4b: Morphological cleanup with text protection
-    img_cleaned = morphological_cleanup(img_smooth, text_mask=text_mask, skip_infill=skip_infill)
+    img_cleaned = morphological_cleanup(
+        img_smooth,
+        text_mask=text_mask,
+        skip_infill=skip_infill,
+        preserve_mask=green_outline_mask
+    )
     
     # Phase 4c: Snap to exact palette colors
     img_quantized = snap_to_palette(img_cleaned)
@@ -1165,13 +1261,13 @@ def restore_image(image_path, output_dir, use_gpu=False, gpu_backend=None, skip_
     img_smooth_edges = smooth_jagged_edges(img_vectorized)
     
     # Phase 4h: Edge-preserving smooth to reduce any remaining jaggedness
-    img_smooth_outlines = edge_preserving_smooth(img_smooth_edges)
+    img_smooth_outlines = edge_preserving_smooth(img_smooth_edges, preserve_mask=green_outline_mask)
     
     # Phase 4i: Apply anti-aliasing for smoother color transitions
-    img_antialiased = apply_anti_aliasing(img_smooth_outlines)
+    img_antialiased = apply_anti_aliasing(img_smooth_outlines, preserve_mask=green_outline_mask)
     
     # Phase 4j: Solidify color regions (remove any remaining texture)
-    img_solid = solidify_color_regions(img_antialiased)
+    img_solid = solidify_color_regions(img_antialiased, preserve_mask=green_outline_mask)
     
     # Phase 5: Downscale back to original size
     print(f"Downscaling to original size: {original_size}")
@@ -1215,6 +1311,22 @@ def restore_image(image_path, output_dir, use_gpu=False, gpu_backend=None, skip_
     
     # Phase 8: Final edge smoothing at output resolution
     img_final = smooth_jagged_edges(img_final)
+
+    # Phase 9: Rebuild neon green outline from finalized yellow/blue regions
+    if not use_natural_green:
+        green_outline_mask_uint8 = green_outline_mask.astype(np.uint8) * 255
+        seed_dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        green_outline_mask_dilated = cv2.dilate(green_outline_mask_uint8, seed_dilate_kernel, iterations=1)
+        green_outline_mask_small = cv2.resize(
+            green_outline_mask_dilated,
+            original_size,
+            interpolation=cv2.INTER_NEAREST
+        ) > 0
+        img_final = apply_green_outline_from_yellow(
+            img_final,
+            ring_size=7 if skip_outline_normalization else 5,
+            seed_mask=green_outline_mask_small
+        )
     
     # Save output
     input_filename = Path(image_path).stem
@@ -1256,6 +1368,7 @@ def main():
         --workers N                     : Number of parallel workers (default: auto-detect based on CPU cores)
         --use-gpu                       : Enable CUDA/GPU acceleration if available
         --sequential                    : Force sequential processing (disables parallelism)
+        --preserve-detail               : Prefer accuracy over aggressive cleanup (default: enabled)
         --skip-outline-normalization    : Skip outline width normalization (preserves original outlines)
         --skip-despec                   : Skip isolated spec removal (faster processing)
         --use-natural-green             : Use natural green detection from original image
@@ -1266,6 +1379,7 @@ def main():
         python restore_playmat_hsv.py scans/ --workers 8                    # Use 8 parallel workers
         python restore_playmat_hsv.py scans/ --use-gpu                      # Enable GPU acceleration
         python restore_playmat_hsv.py scans/ --sequential                   # Sequential processing
+        python restore_playmat_hsv.py scans/ --no-preserve-detail           # Use full cleanup
         python restore_playmat_hsv.py scans/ --skip-outline-normalization   # Preserve original outlines
         python restore_playmat_hsv.py scans/ --skip-despec                  # Skip slow spec removal
         python restore_playmat_hsv.py scans/ --use-natural-green            # Detect green from original
@@ -1279,6 +1393,8 @@ Performance Options for High-Powered Computers:
   --workers N                     Number of parallel workers (default: auto, based on CPU cores)
   --use-gpu                       Enable CUDA/GPU acceleration if available
   --sequential                    Force sequential processing (disable parallelism)
+  --preserve-detail/--no-preserve-detail
+                                  Prefer accuracy over aggressive cleanup (default: enabled)
   --skip-outline-normalization    Skip outline width normalization (preserves original outlines)
   --skip-despec                   Skip isolated spec removal (faster processing)
   --use-natural-green             Use natural green detection from original image
@@ -1289,6 +1405,7 @@ Examples:
   %(prog)s scans/ --workers 16                    # Use 16 parallel workers
   %(prog)s scans/ --use-gpu                       # Enable GPU acceleration
   %(prog)s scan.jpg                               # Process single image
+  %(prog)s scans/ --no-preserve-detail            # Use full cleanup
   %(prog)s scans/ --skip-outline-normalization    # Preserve green outlines
   %(prog)s scans/ --skip-despec                   # Skip spec removal for speed
   %(prog)s scans/ --use-natural-green             # Detect green from original image
@@ -1302,6 +1419,8 @@ Examples:
                         help='Enable CUDA/GPU acceleration if available')
     parser.add_argument('--sequential', action='store_true',
                         help='Force sequential processing (disable parallelism)')
+    parser.add_argument('--preserve-detail', action=argparse.BooleanOptionalAction, default=True,
+                        help='Prefer accuracy over aggressive cleanup (default: enabled)')
     parser.add_argument('--skip-outline-normalization', action='store_true',
                         help='Skip outline width normalization (preserves original outlines)')
     parser.add_argument('--skip-despec', action='store_true',
@@ -1325,6 +1444,11 @@ Examples:
     # Create output directory
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
+
+    if args.preserve_detail:
+        args.skip_outline_normalization = True
+        args.skip_despec = True
+        args.skip_infill = True
     
     # Process single image or directory
     if os.path.isfile(input_path):
