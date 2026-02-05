@@ -1163,15 +1163,21 @@ def apply_green_outline_from_yellow(img, ring_size=5, blue_neighbor_size=5, seed
     cv2.drawContours(yellow_filled, contours, -1, 255, -1)
     yellow_mask = yellow_filled > 0
 
-    # Build outer ring around yellow.
+    # Build a boundary-only outline from the filled yellow mask.
     ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_size, ring_size))
-    yellow_dilated = cv2.dilate(yellow_mask.astype(np.uint8) * 255, ring_kernel, iterations=1) > 0
-    green_ring = yellow_dilated & ~yellow_mask
+    yellow_dilated = cv2.dilate(yellow_mask.astype(np.uint8) * 255, ring_kernel, iterations=1)
+    yellow_eroded = cv2.erode(yellow_mask.astype(np.uint8) * 255, ring_kernel, iterations=1)
+    yellow_edge = (yellow_dilated > 0) & (yellow_eroded == 0)
 
     # Restrict to areas touching blue so the outline only appears outside.
     blue_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (blue_neighbor_size, blue_neighbor_size))
     blue_dilated = cv2.dilate(blue_mask.astype(np.uint8) * 255, blue_kernel, iterations=1) > 0
-    green_outline_mask = green_ring & blue_dilated
+    green_outline_mask = yellow_edge & blue_dilated
+
+    if seed_mask is not None:
+        seed_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        seed_dilated = cv2.dilate(seed_mask.astype(np.uint8) * 255, seed_kernel, iterations=1) > 0
+        green_outline_mask &= seed_dilated
 
     img_result[green_outline_mask] = neon_green
     green_count = np.sum(green_outline_mask)
