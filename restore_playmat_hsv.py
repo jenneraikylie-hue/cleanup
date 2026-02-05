@@ -1066,11 +1066,14 @@ def smooth_jagged_edges(img):
             # Opening erodes thin strokes which destroys outline topology
             smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         else:
-            # FILLS: opening + closing is safe for solid regions
-            # Opening removes small protrusions (bumps outward)
-            # Closing removes small intrusions (bumps inward)
-            smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
+            # FILLS: avoid opening on yellow to preserve thin protrusions (thumbs/fingers)
+            if color_name == 'bright_yellow':
+                smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            else:
+                # Opening removes small protrusions (bumps outward)
+                # Closing removes small intrusions (bumps inward)
+                smoothed = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+                smoothed = cv2.morphologyEx(smoothed, cv2.MORPH_CLOSE, kernel, iterations=1)
         
         # Apply Gaussian blur then threshold to smooth edges
         blurred = cv2.GaussianBlur(smoothed, (3, 3), 0)
