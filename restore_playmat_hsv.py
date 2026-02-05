@@ -404,7 +404,7 @@ def detect_text_regions(img):
     total_image_area = img.shape[0] * img.shape[1]
     max_text_area = total_image_area * 0.1
     # Also limit bounding box area to prevent huge sparse contours from being included
-    max_bbox_area = total_image_area * 0.05  # Bounding box should be < 5% of image
+    max_bbox_area = total_image_area * 0.05  # Max bounding box <= 5% of image
     
     for contour in contours:
         # Get bounding rectangle
@@ -447,8 +447,8 @@ def detect_text_regions(img):
     # Threshold gradient to find high-contrast regions
     _, high_contrast = cv2.threshold(gradient, 30, 255, cv2.THRESH_BINARY)
     
-    # IMPORTANT: Only use edge buffer for edges that are NEAR text-colored regions
-    # This prevents protecting ALL edges in textured images
+    # Important: Only use edge buffer for edges that are near text-colored regions
+    # This prevents protecting all edges in textured images
     # First, dilate the text color mask to create a "text region" area
     text_region_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
     text_region_dilated = cv2.dilate(text_color_mask, text_region_kernel, iterations=2)
@@ -475,7 +475,8 @@ def detect_text_regions(img):
     text_protection_pct = 100.0 * text_pixel_count / total_pixels
     
     # Safeguard: If text protection exceeds 50%, something is wrong
-    # Normal text should be < 20% of the image
+    # Normal text is typically < 20%, but we use 50% as a generous threshold
+    # to allow for high-text-density images while catching clear errors like 100%
     MAX_TEXT_PROTECTION_PCT = 50.0
     if text_protection_pct > MAX_TEXT_PROTECTION_PCT:
         print(f"  WARNING: Text protection is {text_protection_pct:.2f}% which is unusually high!")
