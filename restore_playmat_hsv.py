@@ -311,7 +311,12 @@ def preprocess_with_hsv(img, use_natural_green=False, skip_infill=False):
         # Green hue range: 36-85 degrees (between yellow and cyan)
         # Use broader saturation/value to catch all green variants
         green_mask = (h >= 36) & (h <= 85) & (s > 30) & (v > 50) & ~yellow_mask_final & ~blue_mask & ~white_mask
-        green_mask_final = green_mask
+        
+        # Dilate green mask to compensate for edge loss from strict color thresholds
+        # Anti-aliased/fuzzy edges in the original scan often fall outside the HSV range,
+        # causing the green border to appear thinner. Dilation restores the visual thickness.
+        green_dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        green_mask_final = cv2.dilate(green_mask.astype(np.uint8), green_dilate_kernel, iterations=1).astype(bool)
     else:
         # ==== NEON GREEN (derived as outside boundary of yellow) ====
         # Green outline should ONLY exist on the outside edge of yellow, facing blue
