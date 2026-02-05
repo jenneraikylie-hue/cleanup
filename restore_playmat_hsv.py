@@ -1298,12 +1298,19 @@ def restore_image(image_path, output_dir, use_gpu=False, gpu_backend=None, skip_
 
     # Phase 9: Rebuild neon green outline from finalized yellow/blue regions
     if not use_natural_green:
+        green_outline_mask_uint8 = green_outline_mask.astype(np.uint8) * 255
+        seed_dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        green_outline_mask_dilated = cv2.dilate(green_outline_mask_uint8, seed_dilate_kernel, iterations=1)
         green_outline_mask_small = cv2.resize(
-            green_outline_mask.astype(np.uint8) * 255,
+            green_outline_mask_dilated,
             original_size,
             interpolation=cv2.INTER_NEAREST
         ) > 0
-        img_final = apply_green_outline_from_yellow(img_final, seed_mask=green_outline_mask_small)
+        img_final = apply_green_outline_from_yellow(
+            img_final,
+            ring_size=7 if skip_outline_normalization else 5,
+            seed_mask=green_outline_mask_small
+        )
     
     # Save output
     input_filename = Path(image_path).stem
