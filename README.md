@@ -52,6 +52,27 @@ python restore_playmat_hsv.py scans/ --use-gpu
 python restore_playmat_hsv.py scans/ --workers 8 --use-gpu
 ```
 
+**Setting up GPU acceleration:**
+
+The easiest way to enable GPU acceleration is using **CuPy** (a CUDA-accelerated NumPy library):
+
+1. **Check your CUDA version**: Run `nvidia-smi` and look for "CUDA Version" (e.g., 12.2)
+2. **Install CuPy** matching your CUDA version:
+   ```bash
+   # For CUDA 12.x (most modern systems)
+   pip install cupy-cuda12x
+   
+   # For CUDA 11.x
+   pip install cupy-cuda11x
+   ```
+3. **Run with GPU**: `python restore_playmat_hsv.py scans/ --use-gpu`
+
+**Alternative: OpenCV with CUDA** (more complex, better performance for image operations):
+- Build OpenCV from source with CUDA enabled
+- See: https://docs.opencv.org/4.x/d6/d15/tutorial_building_tegra_cuda.html
+
+The script automatically detects available GPU backends and will use the best one available. When you run with `--use-gpu`, it will display which backend is being used and provide diagnostic information if GPU is not available.
+
 ### Performance Options
 | Option | Description |
 |--------|-------------|
