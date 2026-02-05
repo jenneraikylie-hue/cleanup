@@ -401,7 +401,10 @@ def detect_text_regions(img):
     contour_mask = np.zeros(gray.shape, dtype=np.uint8)
     
     # Pre-calculate max text area threshold (10% of image area)
-    max_text_area = img.shape[0] * img.shape[1] * 0.1
+    total_image_area = img.shape[0] * img.shape[1]
+    max_text_area = total_image_area * 0.1
+    # Also limit bounding box area to prevent huge sparse contours from being included
+    max_bbox_area = total_image_area * 0.05  # Bounding box should be < 5% of image
     
     for contour in contours:
         # Get bounding rectangle
@@ -412,6 +415,7 @@ def detect_text_regions(img):
             continue
             
         area = cv2.contourArea(contour)
+        bbox_area = w * h
         
         # Text characteristics: reasonable aspect ratio, not too small, not too large
         aspect_ratio = w / h
@@ -421,7 +425,8 @@ def detect_text_regions(img):
         is_text_like = (
             (0.1 < aspect_ratio < 20) and  # Reasonable aspect ratio
             (area > 100) and  # Not too small (noise)
-            (area < max_text_area) and  # Not too large (background)
+            (area < max_text_area) and  # Contour not too large (background)
+            (bbox_area < max_bbox_area) and  # Bounding box not too large (prevents sparse contours)
             (w > 10 or h > 10)  # Minimum dimension
         )
         
@@ -442,13 +447,22 @@ def detect_text_regions(img):
     # Threshold gradient to find high-contrast regions
     _, high_contrast = cv2.threshold(gradient, 30, 255, cv2.THRESH_BINARY)
     
-    # Dilate to create protection buffer around edges
-    edge_buffer = cv2.dilate(high_contrast, morph_kernel, iterations=2)
+    # IMPORTANT: Only use edge buffer for edges that are NEAR text-colored regions
+    # This prevents protecting ALL edges in textured images
+    # First, dilate the text color mask to create a "text region" area
+    text_region_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    text_region_dilated = cv2.dilate(text_color_mask, text_region_kernel, iterations=2)
+    
+    # Only keep high-contrast edges that are within or near text-colored regions
+    edge_buffer = cv2.bitwise_and(high_contrast, text_region_dilated)
+    
+    # Small dilation for edge buffer to protect nearby strokes
+    edge_buffer = cv2.dilate(edge_buffer, morph_kernel, iterations=1)
     
     # Combine all detection methods:
     # 1. Text color regions (white and lime green)
     # 2. Contour-based text detection
-    # 3. High-contrast edge regions
+    # 3. High-contrast edge regions (only near text colors)
     combined_mask = cv2.bitwise_or(text_color_mask, contour_mask)
     combined_mask = cv2.bitwise_or(combined_mask, edge_buffer)
     
@@ -458,7 +472,31 @@ def detect_text_regions(img):
     
     text_pixel_count = np.sum(protected_mask > 0)
     total_pixels = img.shape[0] * img.shape[1]
-    print(f"  Text protection: {text_pixel_count:,} pixels ({100.0 * text_pixel_count / total_pixels:.2f}%)")
+    text_protection_pct = 100.0 * text_pixel_count / total_pixels
+    
+    # Safeguard: If text protection exceeds 50%, something is wrong
+    # Normal text should be < 20% of the image
+    MAX_TEXT_PROTECTION_PCT = 50.0
+    if text_protection_pct > MAX_TEXT_PROTECTION_PCT:
+        print(f"  WARNING: Text protection is {text_protection_pct:.2f}% which is unusually high!")
+        print(f"  This may indicate the image is very bright/washed out, or detection thresholds need adjustment.")
+        print(f"  Limiting text protection to contour-based regions only.")
+        
+        # When protection is too high, fall back to contour-based detection only
+        # This is more conservative but prevents over-protection of entire image
+        protected_mask = cv2.dilate(contour_mask, protection_kernel, iterations=1)
+        
+        text_pixel_count = np.sum(protected_mask > 0)
+        text_protection_pct = 100.0 * text_pixel_count / total_pixels
+        
+        # If still too high after using contours only, disable protection entirely
+        if text_protection_pct > MAX_TEXT_PROTECTION_PCT:
+            print(f"  Still too high ({text_protection_pct:.2f}%), disabling text protection for this image.")
+            protected_mask = np.zeros(gray.shape, dtype=np.uint8)
+            text_pixel_count = 0
+            text_protection_pct = 0.0
+    
+    print(f"  Text protection: {text_pixel_count:,} pixels ({text_protection_pct:.2f}%)")
     
     return protected_mask
 
