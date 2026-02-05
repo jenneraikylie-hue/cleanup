@@ -26,6 +26,7 @@ echo     * Preserve original green outlines (no outline normalization)
 echo     * Skip slow spec removal for faster processing
 echo     * Use natural green detection from original image
 echo     * Preserve holes in text (no infilling)
+echo     * Enable GPU acceleration if available (install cupy-cuda12x for GPU)
 echo   - Output cleaned images to "scans/output"
 echo.
 echo ============================================================================
@@ -103,9 +104,10 @@ echo   - Preserving original green outlines (--skip-outline-normalization)
 echo   - Skipping slow spec removal (--skip-despec)
 echo   - Using natural green detection (--use-natural-green)
 echo   - Preserving holes in text (--skip-infill)
+echo   - GPU acceleration enabled if available (--use-gpu)
 echo.
 
-python restore_playmat_hsv.py scans/ --skip-outline-normalization --skip-despec --use-natural-green --skip-infill
+python restore_playmat_hsv.py scans/ --skip-outline-normalization --skip-despec --use-natural-green --skip-infill --use-gpu
 if errorlevel 1 (
     echo.
     echo [ERROR] Processing failed - check error messages above

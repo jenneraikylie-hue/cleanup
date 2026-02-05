@@ -45,11 +45,69 @@ cv2.setUseOptimized(True)
 # This improves performance of operations like resize, filter, morphology
 cv2.setNumThreads(0)  # 0 = auto-detect optimal thread count
 
-# Check for CUDA/GPU support
+# Check for CUDA/GPU support with detailed diagnostics
+# Support multiple GPU backends: OpenCV CUDA or CuPy
+GPU_AVAILABLE = False
+GPU_BACKEND = None  # 'opencv' or 'cupy'
+GPU_DETECTION_MESSAGE = ""
+
+# Try to import CuPy for alternative GPU acceleration
 try:
-    GPU_AVAILABLE = hasattr(cv2, 'cuda') and hasattr(cv2.cuda, 'getCudaEnabledDeviceCount') and cv2.cuda.getCudaEnabledDeviceCount() > 0
-except cv2.error:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    CUPY_AVAILABLE = False
+    cp = None
+
+def _detect_gpu():
+    """
+    Detect GPU/CUDA availability and provide diagnostic information.
+    Checks for OpenCV CUDA first, then falls back to CuPy.
+    
+    Returns:
+        tuple: (gpu_available: bool, backend: str or None, message: str)
+    """
+    # First, try OpenCV CUDA (preferred for image operations)
+    has_cuda_module = hasattr(cv2, 'cuda')
+    
+    if has_cuda_module:
+        has_device_count = hasattr(cv2.cuda, 'getCudaEnabledDeviceCount')
+        if has_device_count:
+            try:
+                device_count = cv2.cuda.getCudaEnabledDeviceCount()
+                if device_count > 0:
+                    try:
+                        device_info = cv2.cuda.getDevice()
+                        return True, 'opencv', f"OpenCV CUDA enabled with {device_count} device(s). Active device: {device_info}"
+                    except (cv2.error, AttributeError):
+                        return True, 'opencv', f"OpenCV CUDA enabled with {device_count} device(s)."
+            except cv2.error:
+                pass  # Fall through to CuPy check
+    
+    # Second, try CuPy (NumPy-compatible GPU arrays)
+    if CUPY_AVAILABLE:
+        try:
+            device_count = cp.cuda.runtime.getDeviceCount()
+            if device_count > 0:
+                device_props = cp.cuda.runtime.getDeviceProperties(0)
+                device_name = device_props['name'].decode('utf-8') if isinstance(device_props['name'], bytes) else device_props['name']
+                return True, 'cupy', f"CuPy CUDA enabled with {device_count} device(s). GPU: {device_name}"
+        except Exception as e:
+            pass  # Fall through to no GPU
+    
+    # No GPU available - provide helpful message
+    if CUPY_AVAILABLE:
+        return False, None, "CuPy installed but no CUDA GPU detected. Check your NVIDIA drivers."
+    else:
+        return False, None, "No GPU backend available. Install CuPy for GPU acceleration: pip install cupy-cuda12x"
+
+# Initialize GPU detection
+try:
+    GPU_AVAILABLE, GPU_BACKEND, GPU_DETECTION_MESSAGE = _detect_gpu()
+except Exception as e:
     GPU_AVAILABLE = False
+    GPU_BACKEND = None
+    GPU_DETECTION_MESSAGE = f"GPU detection failed: {e}"
 
 
 def configure_performance(use_gpu=False, num_workers=None, verbose=True):
@@ -67,6 +125,7 @@ def configure_performance(use_gpu=False, num_workers=None, verbose=True):
     settings = {
         'num_workers': num_workers or DEFAULT_WORKERS,
         'use_gpu': use_gpu and GPU_AVAILABLE,
+        'gpu_backend': GPU_BACKEND if (use_gpu and GPU_AVAILABLE) else None,
         'opencv_threads': cv2.getNumThreads(),
         'opencv_optimized': cv2.useOptimized(),
     }
@@ -79,8 +138,20 @@ def configure_performance(use_gpu=False, num_workers=None, verbose=True):
         print(f"  Parallel Workers: {settings['num_workers']}")
         print(f"  OpenCV Threads: {settings['opencv_threads']} (per operation)")
         print(f"  OpenCV Optimized: {settings['opencv_optimized']}")
-        print(f"  GPU/CUDA Available: {GPU_AVAILABLE}")
+        print(f"  GPU/CUDA Available: {GPU_AVAILABLE}" + (f" (backend: {GPU_BACKEND})" if GPU_AVAILABLE else ""))
         print(f"  GPU Acceleration: {'ENABLED' if settings['use_gpu'] else 'DISABLED'}")
+        
+        # Show diagnostic message if GPU requested but not available
+        if use_gpu and not GPU_AVAILABLE:
+            print(f"\n  ⚠️  GPU Note: {GPU_DETECTION_MESSAGE}")
+            print("\n  To enable GPU acceleration (easiest method):")
+            print("    pip install cupy-cuda12x    # For CUDA 12.x (check your version with nvidia-smi)")
+            print("    pip install cupy-cuda11x    # For CUDA 11.x")
+            print("\n  Alternative: Install OpenCV with CUDA support (more complex):")
+            print("    See: https://docs.opencv.org/4.x/d6/d15/tutorial_building_tegra_cuda.html")
+        elif use_gpu and GPU_AVAILABLE:
+            print(f"\n  ✓ {GPU_DETECTION_MESSAGE}")
+        
         print("=" * 60 + "\n")
     
     return settings
@@ -104,7 +175,7 @@ PALETTE_ARRAY = np.array(list(PALETTE.values()), dtype=np.float32)
 PALETTE_NAMES = list(PALETTE.keys())
 
 
-def load_and_upscale(image_path, scale=2, use_gpu=False):
+def load_and_upscale(image_path, scale=2, use_gpu=False, gpu_backend=None):
     """
     Load image and upscale for better processing.
     
@@ -112,6 +183,7 @@ def load_and_upscale(image_path, scale=2, use_gpu=False):
         image_path: Path to the image file
         scale: Upscaling factor (default 2x)
         use_gpu: Use CUDA/GPU acceleration for resize if available
+        gpu_backend: GPU backend to use ('opencv' or 'cupy')
     """
     print(f"Loading image: {image_path}")
     img = cv2.imread(image_path)
@@ -126,19 +198,34 @@ def load_and_upscale(image_path, scale=2, use_gpu=False):
     
     # Use GPU acceleration if available and enabled
     if use_gpu and GPU_AVAILABLE:
-        try:
-            gpu_img = cv2.cuda_GpuMat()
-            gpu_img.upload(img)
-            gpu_resized = cv2.cuda.resize(gpu_img, new_size, interpolation=cv2.INTER_CUBIC)
-            img_large = gpu_resized.download()
-            print(f"Upscaled to: {new_size} (GPU accelerated)")
-        except cv2.error:
-            # Fallback to CPU if GPU fails
-            img_large = cv2.resize(img, new_size, interpolation=cv2.INTER_CUBIC)
-            print(f"Upscaled to: {new_size} (CPU fallback)")
-    else:
-        img_large = cv2.resize(img, new_size, interpolation=cv2.INTER_CUBIC)
-        print(f"Upscaled to: {new_size}")
+        if gpu_backend == 'opencv':
+            try:
+                gpu_img = cv2.cuda_GpuMat()
+                gpu_img.upload(img)
+                gpu_resized = cv2.cuda.resize(gpu_img, new_size, interpolation=cv2.INTER_CUBIC)
+                img_large = gpu_resized.download()
+                print(f"Upscaled to: {new_size} (OpenCV CUDA accelerated)")
+                return img_large, original_size
+            except cv2.error:
+                print(f"  OpenCV CUDA resize failed, falling back to CPU")
+        
+        elif gpu_backend == 'cupy':
+            try:
+                # Use CuPy with cupyx.scipy for GPU-accelerated resize
+                from cupyx.scipy.ndimage import zoom
+                img_gpu = cp.asarray(img)
+                # zoom factors for each dimension (height, width, channels)
+                zoom_factors = (scale, scale, 1)
+                img_resized_gpu = zoom(img_gpu, zoom_factors, order=3)  # order=3 is cubic
+                img_large = cp.asnumpy(img_resized_gpu)
+                print(f"Upscaled to: {new_size} (CuPy CUDA accelerated)")
+                return img_large, original_size
+            except Exception as e:
+                print(f"  CuPy resize failed ({e}), falling back to CPU")
+    
+    # CPU fallback
+    img_large = cv2.resize(img, new_size, interpolation=cv2.INTER_CUBIC)
+    print(f"Upscaled to: {new_size}")
     
     return img_large, original_size
 
@@ -324,7 +411,7 @@ def preprocess_with_hsv(img, use_natural_green=False, skip_infill=False):
     return img_processed
 
 
-def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50, use_gpu=False):
+def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50, use_gpu=False, gpu_backend=None):
     """
     Apply bilateral filter to smooth texture while preserving edges.
     UPDATED: Reduced parameters (d=9, sigma=50) to preserve thin outlines like green borders.
@@ -335,23 +422,46 @@ def bilateral_smooth_edges(img, d=9, sigma_color=50, sigma_space=50, use_gpu=Fal
         sigma_color: Filter sigma in the color space
         sigma_space: Filter sigma in the coordinate space
         use_gpu: Use CUDA/GPU acceleration if available
+        gpu_backend: GPU backend to use ('opencv' or 'cupy')
     """
     print("Applying bilateral filter for edge-preserving smoothing...")
     
     # Use GPU acceleration if available and enabled
     if use_gpu and GPU_AVAILABLE:
-        try:
-            gpu_img = cv2.cuda_GpuMat()
-            gpu_img.upload(img)
-            gpu_smoothed = cv2.cuda.bilateralFilter(gpu_img, d, sigma_color, sigma_space)
-            smoothed = gpu_smoothed.download()
-            print("  (GPU accelerated)")
-        except cv2.error:
-            # Fallback to CPU if GPU fails
-            smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
-    else:
-        smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
+        if gpu_backend == 'opencv':
+            try:
+                gpu_img = cv2.cuda_GpuMat()
+                gpu_img.upload(img)
+                gpu_smoothed = cv2.cuda.bilateralFilter(gpu_img, d, sigma_color, sigma_space)
+                smoothed = gpu_smoothed.download()
+                print("  (OpenCV CUDA accelerated)")
+                return smoothed
+            except cv2.error:
+                print("  OpenCV CUDA bilateral filter failed, falling back to CPU")
+        
+        elif gpu_backend == 'cupy':
+            try:
+                # CuPy doesn't have a direct bilateral filter, so we use Gaussian filter
+                # as an approximation. Gaussian smoothing is applied to all color channels
+                # to reduce texture while preserving overall color balance.
+                # Note: Bilateral filter preserves edges better, but Gaussian is faster on GPU.
+                from cupyx.scipy.ndimage import gaussian_filter
+                img_gpu = cp.asarray(img.astype(np.float32))
+                # Apply Gaussian filter to each color channel (B, G, R)
+                smoothed_gpu = cp.empty_like(img_gpu)
+                # sigma_space from bilateral (typically 50) is scaled down for Gaussian
+                # since Gaussian sigma directly controls blur radius in pixels
+                gaussian_sigma = sigma_space / 10.0  # Scale factor: bilateral sigma_space ~50 -> Gaussian sigma ~5
+                for c in range(3):
+                    smoothed_gpu[:,:,c] = gaussian_filter(img_gpu[:,:,c], sigma=gaussian_sigma)
+                smoothed = cp.asnumpy(smoothed_gpu).astype(np.uint8)
+                print("  (CuPy CUDA accelerated - Gaussian approximation)")
+                return smoothed
+            except Exception as e:
+                print(f"  CuPy filter failed ({e}), falling back to CPU")
     
+    # CPU fallback - use true bilateral filter
+    smoothed = cv2.bilateralFilter(img, d, sigma_color, sigma_space)
     return smoothed
 
 
@@ -992,7 +1102,7 @@ def solidify_color_regions(img, kernel_size=5):
     return img_solid
 
 
-def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalization=False, skip_despec=False, use_natural_green=False, skip_infill=False):
+def restore_image(image_path, output_dir, use_gpu=False, gpu_backend=None, skip_outline_normalization=False, skip_despec=False, use_natural_green=False, skip_infill=False):
     """
     Main restoration pipeline.
     
@@ -1000,6 +1110,7 @@ def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalizat
         image_path: Path to the input image
         output_dir: Directory to save the output
         use_gpu: Enable CUDA/GPU acceleration for supported operations
+        gpu_backend: GPU backend to use ('opencv' or 'cupy')
         skip_outline_normalization: Skip outline width normalization (preserves original outlines)
         skip_despec: Skip isolated spec removal (faster processing)
         use_natural_green: Use natural green detection instead of deriving from yellow
@@ -1010,7 +1121,7 @@ def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalizat
     print(f"{'='*60}")
     
     # Phase 1: Load and upscale (GPU accelerated if enabled)
-    img_large, original_size = load_and_upscale(image_path, use_gpu=use_gpu)
+    img_large, original_size = load_and_upscale(image_path, use_gpu=use_gpu, gpu_backend=gpu_backend)
     
     # Phase 2: Detect text regions for protection BEFORE any processing
     text_mask = detect_text_regions(img_large)
@@ -1019,7 +1130,7 @@ def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalizat
     img_preprocessed = preprocess_with_hsv(img_large, use_natural_green=use_natural_green, skip_infill=skip_infill)
     
     # Phase 4a: Bilateral filtering for edge-preserving smoothing (GPU accelerated if enabled)
-    img_smooth = bilateral_smooth_edges(img_preprocessed, use_gpu=use_gpu)
+    img_smooth = bilateral_smooth_edges(img_preprocessed, use_gpu=use_gpu, gpu_backend=gpu_backend)
     
     # Phase 4b: Morphological cleanup with text protection
     img_cleaned = morphological_cleanup(img_smooth, text_mask=text_mask, skip_infill=skip_infill)
@@ -1062,12 +1173,28 @@ def restore_image(image_path, output_dir, use_gpu=False, skip_outline_normalizat
     
     # Use GPU acceleration for final resize if available
     if use_gpu and GPU_AVAILABLE:
-        try:
-            gpu_img = cv2.cuda_GpuMat()
-            gpu_img.upload(img_solid)
-            gpu_resized = cv2.cuda.resize(gpu_img, original_size, interpolation=cv2.INTER_AREA)
-            img_final = gpu_resized.download()
-        except cv2.error:
+        if gpu_backend == 'opencv':
+            try:
+                gpu_img = cv2.cuda_GpuMat()
+                gpu_img.upload(img_solid)
+                gpu_resized = cv2.cuda.resize(gpu_img, original_size, interpolation=cv2.INTER_AREA)
+                img_final = gpu_resized.download()
+            except cv2.error:
+                img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
+        elif gpu_backend == 'cupy' and CUPY_AVAILABLE:
+            try:
+                from cupyx.scipy.ndimage import zoom
+                img_gpu = cp.asarray(img_solid)
+                # Calculate zoom factors to reach target size
+                zoom_h = original_size[1] / img_solid.shape[0]
+                zoom_w = original_size[0] / img_solid.shape[1]
+                # order=1 is bilinear interpolation (approximation for downscaling,
+                # not equivalent to cv2.INTER_AREA which averages pixels)
+                img_resized_gpu = zoom(img_gpu, (zoom_h, zoom_w, 1), order=1)
+                img_final = cp.asnumpy(img_resized_gpu)
+            except Exception:
+                img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
+        else:
             img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
     else:
         img_final = cv2.resize(img_solid, original_size, interpolation=cv2.INTER_AREA)
@@ -1098,14 +1225,15 @@ def process_single_image(args):
     Wrapper function for parallel processing.
     
     Args:
-        args: Tuple of (image_path, output_dir, use_gpu, skip_outline_normalization, skip_despec, use_natural_green, skip_infill)
+        args: Tuple of (image_path, output_dir, use_gpu, gpu_backend, skip_outline_normalization, skip_despec, use_natural_green, skip_infill)
     
     Returns:
         Tuple of (image_path, success, result_or_error)
     """
-    image_path, output_dir, use_gpu, skip_outline_normalization, skip_despec, use_natural_green, skip_infill = args
+    image_path, output_dir, use_gpu, gpu_backend, skip_outline_normalization, skip_despec, use_natural_green, skip_infill = args
     try:
         result = restore_image(image_path, output_dir, use_gpu=use_gpu, 
+                              gpu_backend=gpu_backend,
                               skip_outline_normalization=skip_outline_normalization,
                               skip_despec=skip_despec,
                               use_natural_green=use_natural_green,
@@ -1197,6 +1325,7 @@ Examples:
     if os.path.isfile(input_path):
         # Single image - no parallelism needed
         restore_image(input_path, output_dir, use_gpu=settings['use_gpu'],
+                     gpu_backend=settings['gpu_backend'],
                      skip_outline_normalization=args.skip_outline_normalization,
                      skip_despec=args.skip_despec,
                      use_natural_green=args.use_natural_green,
@@ -1221,7 +1350,7 @@ Examples:
             
             # Prepare arguments for parallel processing
             process_args = [
-                (str(img_path), output_dir, settings['use_gpu'], 
+                (str(img_path), output_dir, settings['use_gpu'], settings['gpu_backend'],
                  args.skip_outline_normalization, args.skip_despec,
                  args.use_natural_green, args.skip_infill)
                 for img_path in image_files
@@ -1264,6 +1393,7 @@ Examples:
             for img_path in image_files:
                 try:
                     restore_image(str(img_path), output_dir, use_gpu=settings['use_gpu'],
+                                 gpu_backend=settings['gpu_backend'],
                                  skip_outline_normalization=args.skip_outline_normalization,
                                  skip_despec=args.skip_despec,
                                  use_natural_green=args.use_natural_green,
