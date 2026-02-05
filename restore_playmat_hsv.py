@@ -1156,6 +1156,13 @@ def apply_green_outline_from_yellow(img, ring_size=5, blue_neighbor_size=5, seed
         img_result[green_mask & yellow_neighbors] = bright_yellow
         img_result[green_mask & ~yellow_neighbors] = sky_blue
 
+    # Fill holes so internal gaps don't generate inner green rings.
+    yellow_mask_uint8 = yellow_mask.astype(np.uint8) * 255
+    contours, _ = cv2.findContours(yellow_mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    yellow_filled = np.zeros_like(yellow_mask_uint8)
+    cv2.drawContours(yellow_filled, contours, -1, 255, -1)
+    yellow_mask = yellow_filled > 0
+
     # Build outer ring around yellow.
     ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_size, ring_size))
     yellow_dilated = cv2.dilate(yellow_mask.astype(np.uint8) * 255, ring_kernel, iterations=1) > 0
