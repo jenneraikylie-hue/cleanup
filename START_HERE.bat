@@ -21,7 +21,11 @@ echo.
 echo This script will:
 echo   - Check Python installation
 echo   - Install required packages (opencv-python, numpy)
-echo   - Process all images in the "scans" folder
+echo   - Process all images in the "scans" folder with optimized settings:
+echo     * Preserve original green outlines (no outline normalization)
+echo     * Skip slow spec removal for faster processing
+echo     * Use natural green detection from original image
+echo     * Preserve holes in text (no infilling)
 echo   - Output cleaned images to "scans/output"
 echo.
 echo ============================================================================
@@ -89,13 +93,19 @@ if errorlevel 1 (
 echo [OK] Packages installed successfully
 echo.
 
-REM Run the restoration script
+REM Run the restoration script with optimized options
 echo ============================================================================
 echo Processing images with HSV color detection...
 echo ============================================================================
 echo.
+echo Using optimized settings:
+echo   - Preserving original green outlines (--skip-outline-normalization)
+echo   - Skipping slow spec removal (--skip-despec)
+echo   - Using natural green detection (--use-natural-green)
+echo   - Preserving holes in text (--skip-infill)
+echo.
 
-python restore_playmat_hsv.py scans/
+python restore_playmat_hsv.py scans/ --skip-outline-normalization --skip-despec --use-natural-green --skip-infill
 if errorlevel 1 (
     echo.
     echo [ERROR] Processing failed - check error messages above
